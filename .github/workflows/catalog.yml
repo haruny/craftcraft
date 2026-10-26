@@ -47,7 +47,7 @@ jobs:
       - name: Collect the catalog
         run: |
           mkdir _site
-          cp catalog/catalog.json catalog/catalog.schema.json _site/
+          cp catalog/catalog.json catalog/catalog.schema.json catalog/index.html _site/
       - uses: actions/upload-pages-artifact@v3
       - id: deployment
         uses: actions/deploy-pages@v4
