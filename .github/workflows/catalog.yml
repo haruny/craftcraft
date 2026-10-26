@@ -1,0 +1,53 @@
+name: Catalog
+
+on:
+  push:
+    branches: [main]
+    paths: ["catalog/**", ".github/workflows/catalog.yml"]
+  pull_request:
+    paths: ["catalog/**", ".github/workflows/catalog.yml"]
+  schedule:
+    # Daily: catch apps whose new releases renamed their files.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: catalog-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check catalog.json against the apps' latest releases
+        run: node catalog/check.mjs --online
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publishes https://haruny.github.io/craftcraft/catalog.json, which every launcher polls.
+  deploy:
+    needs: check
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Collect the catalog
+        run: |
+          mkdir _site
+          cp catalog/catalog.json catalog/catalog.schema.json _site/
+      - uses: actions/upload-pages-artifact@v3
+      - id: deployment
+        uses: actions/deploy-pages@v4

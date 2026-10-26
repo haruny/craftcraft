@@ -1,0 +1,1019 @@
+//! The window: a sidebar of sections, and a grid of app cards.
+
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
+
+use eframe::egui::text::LayoutJob;
+use eframe::egui::{self, Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Margin, RichText, Sense, Stroke, TextFormat, TextureHandle, Vec2};
+
+use crate::catalog::{App, Catalog, Kind, Method, Platform};
+use crate::detect::Detected;
+use crate::feed::{self, FeedResult};
+use crate::github::{Lookup, Release};
+use crate::install::{self, Stage};
+use crate::paths::Paths;
+use crate::state::{Installed, State};
+use crate::theme::{self, Palette};
+use crate::worker::{Event, Worker};
+use crate::{now, system, version};
+
+const SIDEBAR_WIDTH: f32 = 236.0;
+const CARD_MIN_WIDTH: f32 = 320.0;
+const CARD_HEIGHT: f32 = 208.0;
+const GAP: f32 = 14.0;
+/// After a failed catalog check, wait this long before trying again.
+const RETRY_AFTER: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Clone, PartialEq, Eq)]
+enum Filter {
+    All,
+    Installed,
+    Updates,
+    Category(String),
+}
+
+enum Busy {
+    Working(Stage),
+    Removing,
+}
+
+enum Icon {
+    Loading,
+    Ready(TextureHandle),
+    Missing,
+}
+
+/// Where an app stands on this computer. `external` means it was found already installed (by its
+/// own installer, winget, a package manager…) rather than installed into the launcher's folder.
+enum Status<'a> {
+    NoBuild,
+    /// The latest release isn't known yet (or couldn't be found).
+    Unknown,
+    Available(&'a Release),
+    /// Up to date, or there's no way to tell.
+    Installed {
+        version: Option<String>,
+        latest: Option<&'a Release>,
+        external: bool,
+    },
+    Update {
+        from: Option<String>,
+        to: &'a Release,
+        external: bool,
+    },
+}
+
+pub struct Launcher {
+    paths: Paths,
+    worker: Worker,
+    state: State,
+    platform: Option<Platform>,
+    catalog: Option<Catalog>,
+    catalog_error: Option<String>,
+    releases: HashMap<String, Lookup>,
+    /// Catalog apps found already installed on this computer.
+    detected: HashMap<String, Detected>,
+    busy: HashMap<String, Busy>,
+    app_errors: HashMap<String, String>,
+    icons: HashMap<String, Icon>,
+    checking_catalog: bool,
+    checking_releases: bool,
+    last_attempt: Option<Instant>,
+    search: String,
+    filter: Filter,
+    show_settings: bool,
+    message: Option<(String, Instant)>,
+}
+
+impl Launcher {
+    pub fn new(cc: &eframe::CreationContext<'_>, paths: Paths) -> Self {
+        theme::install(&cc.egui_ctx);
+        install::tidy(&paths);
+        let worker = Worker::new(cc.egui_ctx.clone(), paths.clone());
+        let state = State::load(&paths);
+        let catalog = feed::cached(&paths);
+        let mut releases = HashMap::new();
+        if let Some(c) = &catalog {
+            for app in &c.apps {
+                if let Some(r) = worker.releases.cached(&app.repo) {
+                    releases.insert(app.id.clone(), Lookup::Found(r));
+                }
+            }
+        }
+        let mut launcher = Self {
+            paths,
+            worker,
+            state,
+            platform: Platform::current(),
+            catalog,
+            catalog_error: None,
+            releases,
+            detected: HashMap::new(),
+            busy: HashMap::new(),
+            app_errors: HashMap::new(),
+            icons: HashMap::new(),
+            checking_catalog: false,
+            checking_releases: false,
+            last_attempt: None,
+            search: String::new(),
+            filter: Filter::All,
+            show_settings: false,
+            message: None,
+        };
+        launcher.fetch_icons();
+        launcher.detect();
+        // Always look at start-up: with an ETag an unchanged catalog costs next to nothing.
+        if launcher.state.settings.auto_check {
+            launcher.check_now();
+        }
+        launcher
+    }
+
+    fn check_now(&mut self) {
+        if self.checking_catalog {
+            return;
+        }
+        self.checking_catalog = true;
+        self.last_attempt = Some(Instant::now());
+        self.worker.refresh_catalog(feed::source());
+    }
+
+    /// Looks for the catalog's apps already on this computer.
+    fn detect(&self) {
+        if let (Some(catalog), Some(platform)) = (&self.catalog, self.platform) {
+            self.worker.detect(catalog.apps.clone(), platform);
+        }
+    }
+
+    /// A copy the launcher unpacked into its own folder. (What a system installer installed is
+    /// found by detection instead, so it reflects what's really there.)
+    fn managed(&self, id: &str) -> Option<&Installed> {
+        self.state.installed.get(id).filter(|i| i.method != Method::Installer)
+    }
+
+    fn check_releases(&mut self) {
+        let (Some(catalog), Some(platform)) = (&self.catalog, self.platform) else { return };
+        if self.checking_releases {
+            return;
+        }
+        let apps: Vec<_> = catalog.apps.iter().filter(|a| a.asset_for(platform).is_some()).map(|a| (a.id.clone(), a.repo.clone())).collect();
+        self.checking_releases = true;
+        self.worker.check_releases(apps);
+    }
+
+    /// Starts fetching icons the catalog names that aren't loaded or loading yet.
+    fn fetch_icons(&mut self) {
+        let Some(catalog) = &self.catalog else { return };
+        let wanted: Vec<(String, String)> =
+            catalog.apps.iter().filter(|a| !self.icons.contains_key(&a.id)).filter_map(|a| a.icon.clone().map(|url| (a.id.clone(), url))).collect();
+        for (id, _) in &wanted {
+            self.icons.insert(id.clone(), Icon::Loading);
+        }
+        if !wanted.is_empty() {
+            self.worker.fetch_icons(wanted);
+        }
+    }
+
+    /// Checks again when `refresh_hours` have passed, or a while after a failure.
+    fn schedule(&mut self) {
+        if !self.state.settings.auto_check || self.checking_catalog {
+            return;
+        }
+        let hours = self.catalog.as_ref().map_or(6, |c| c.refresh_hours);
+        let due = now() - self.state.last_check >= i64::from(hours) * 3600;
+        let waited = self.last_attempt.is_none_or(|t| t.elapsed() >= RETRY_AFTER);
+        if due && waited {
+            self.check_now();
+        }
+    }
+
+    fn handle(&mut self, ctx: &egui::Context, event: Event) {
+        match event {
+            Event::Catalog(result) => {
+                self.checking_catalog = false;
+                match result {
+                    FeedResult::Updated(parsed) => {
+                        for p in &parsed.problems {
+                            eprintln!("catalog: {p}");
+                        }
+                        if !self.state.seen_first_catalog {
+                            self.state.mark_all_seen(&parsed.catalog);
+                        }
+                        // An app whose icon changed gets it fetched again.
+                        if let Some(old) = &self.catalog {
+                            for app in &parsed.catalog.apps {
+                                if old.app(&app.id).is_none_or(|o| o.icon != app.icon) {
+                                    self.icons.remove(&app.id);
+                                }
+                            }
+                        }
+                        self.catalog = Some(parsed.catalog);
+                        self.catalog_error = None;
+                        self.state.last_check = now();
+                        self.state.save(&self.paths);
+                        self.fetch_icons();
+                        self.detect();
+                        self.check_releases();
+                    }
+                    FeedResult::Unchanged => {
+                        self.catalog_error = None;
+                        self.state.last_check = now();
+                        self.state.save(&self.paths);
+                        self.detect();
+                        self.check_releases();
+                    }
+                    FeedResult::Failed(e) => self.catalog_error = Some(e),
+                }
+            }
+            Event::Release { id, lookup } => {
+                // Keep a known release rather than replace it with a failure.
+                if matches!(lookup, Lookup::Found(_)) || !matches!(self.releases.get(&id), Some(Lookup::Found(_))) {
+                    self.releases.insert(id, lookup);
+                }
+            }
+            Event::ReleasesChecked => self.checking_releases = false,
+            Event::Progress { id, stage } => {
+                self.busy.insert(id, Busy::Working(stage));
+            }
+            Event::Installed { id, result } => {
+                self.busy.remove(&id);
+                match result {
+                    Ok(installed) => {
+                        let name = self.app_name(&id);
+                        let note = if installed.verified { "" } else { " (unverified: no published checksum)" };
+                        self.flash(format!("{name} {} is installed{note}", version::display(&installed.tag)));
+                        self.app_errors.remove(&id);
+                        // A system install is tracked by detection, which sees what's really there.
+                        if installed.method == Method::Installer {
+                            self.state.installed.remove(&id);
+                        } else {
+                            self.state.installed.insert(id, installed);
+                        }
+                        self.state.save(&self.paths);
+                    }
+                    Err(e) => {
+                        self.app_errors.insert(id, e);
+                    }
+                }
+                self.detect();
+            }
+            Event::Uninstalled { id, result } => {
+                self.busy.remove(&id);
+                match result {
+                    Ok(()) => {
+                        self.flash(format!("{} was removed", self.app_name(&id)));
+                        self.state.installed.remove(&id);
+                        self.state.save(&self.paths);
+                    }
+                    Err(e) => {
+                        self.app_errors.insert(id, e);
+                    }
+                }
+                self.detect();
+            }
+            Event::Detected(found) => self.detected = found,
+            Event::Icon { id, image } => {
+                let icon = match image {
+                    Some(image) => Icon::Ready(ctx.load_texture(format!("icon-{id}"), image, egui::TextureOptions::LINEAR)),
+                    None => Icon::Missing,
+                };
+                self.icons.insert(id, icon);
+            }
+        }
+    }
+
+    fn app_name(&self, id: &str) -> String {
+        self.catalog.as_ref().and_then(|c| c.app(id)).map_or_else(|| id.to_string(), |a| a.name.clone())
+    }
+
+    fn flash(&mut self, text: String) {
+        self.message = Some((text, Instant::now()));
+    }
+
+    fn status<'a>(&'a self, app: &App) -> Status<'a> {
+        let Some(platform) = self.platform else { return Status::NoBuild };
+        let latest = match self.releases.get(&app.id) {
+            Some(Lookup::Found(r)) => Some(r),
+            _ => None,
+        };
+        let (version, external) = if let Some(installed) = self.managed(&app.id) {
+            (Some(installed.tag.clone()), false)
+        } else if let Some(found) = self.detected.get(&app.id) {
+            (found.version.clone(), true)
+        } else if app.asset_for(platform).is_none() {
+            return Status::NoBuild;
+        } else {
+            return latest.map_or(Status::Unknown, Status::Available);
+        };
+        match (latest, &version) {
+            (Some(to), Some(from)) if version::is_newer(&to.tag, from) && app.asset_for(platform).is_some() => Status::Update { from: version, to, external },
+            _ => Status::Installed { version, latest, external },
+        }
+    }
+
+    fn is_installed(&self, app: &App) -> bool {
+        matches!(self.status(app), Status::Installed { .. } | Status::Update { .. })
+    }
+
+    fn update_count(&self) -> usize {
+        self.catalog.as_ref().map_or(0, |c| c.apps.iter().filter(|a| matches!(self.status(a), Status::Update { .. })).count())
+    }
+
+    fn matches(&self, app: &App) -> bool {
+        let filter_ok = match &self.filter {
+            Filter::All => true,
+            Filter::Installed => self.is_installed(app),
+            Filter::Updates => matches!(self.status(app), Status::Update { .. }),
+            Filter::Category(c) => app.category == *c,
+        };
+        if !filter_ok {
+            return false;
+        }
+        let q = self.search.trim().to_lowercase();
+        if q.is_empty() {
+            return true;
+        }
+        let hay = format!("{} {} {} {}", app.name, app.tagline, app.description, app.replaces.join(" ")).to_lowercase();
+        q.split_whitespace().all(|w| hay.contains(w))
+    }
+}
+
+impl eframe::App for Launcher {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let events: Vec<Event> = self.worker.events().collect();
+        for event in events {
+            self.handle(ctx, event);
+        }
+        self.schedule();
+        // Wake up now and then to run the schedule even when nothing else happens.
+        ctx.request_repaint_after(Duration::from_secs(60));
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let p = theme::palette(ui.ctx());
+        egui::Panel::left("sidebar")
+            .exact_size(SIDEBAR_WIDTH)
+            .resizable(false)
+            .frame(Frame::new().fill(p.surface).inner_margin(Margin::symmetric(14, 16)).stroke(Stroke::new(1.0, p.line)))
+            .show(ui, |ui| self.sidebar(ui, p));
+        egui::CentralPanel::default().frame(Frame::new().fill(p.canvas).inner_margin(Margin { left: 28, right: 20, top: 22, bottom: 0 })).show(ui, |ui| {
+            self.page_header(ui, p);
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                ui.set_max_width(ui.available_width() - 8.0);
+                self.banners(ui, p);
+                self.grid(ui, p);
+                ui.add_space(24.0);
+            });
+        });
+        if self.show_settings {
+            self.settings(ui.ctx(), p);
+        }
+        self.toast(ui.ctx(), p);
+    }
+}
+
+// Drawing.
+impl Launcher {
+    fn sidebar(&mut self, ui: &mut egui::Ui, p: Palette) {
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            logo(ui, 28.0);
+            ui.label(RichText::new("CraftCraft").family(theme::strong()).size(17.0).color(p.ink));
+        });
+        ui.add_space(18.0);
+
+        let installed = self.catalog.as_ref().map_or(0, |c| c.apps.iter().filter(|a| self.is_installed(a)).count());
+        let updates = self.update_count();
+        let total = self.catalog.as_ref().map_or(0, |c| c.apps.len());
+        let mut chosen = None;
+        section_label(ui, p, "Library");
+        if nav_item(ui, p, "All apps", total, self.filter == Filter::All, false) {
+            chosen = Some(Filter::All);
+        }
+        if nav_item(ui, p, "Installed", installed, self.filter == Filter::Installed, false) {
+            chosen = Some(Filter::Installed);
+        }
+        if nav_item(ui, p, "Updates", updates, self.filter == Filter::Updates, updates > 0) {
+            chosen = Some(Filter::Updates);
+        }
+        if let Some(catalog) = &self.catalog {
+            ui.add_space(14.0);
+            section_label(ui, p, "Categories");
+            for c in &catalog.categories {
+                let n = catalog.apps.iter().filter(|a| a.category == c.id).count();
+                if n > 0 {
+                    let filter = Filter::Category(c.id.clone());
+                    if nav_item(ui, p, &c.name, n, self.filter == filter, false) {
+                        chosen = Some(filter);
+                    }
+                }
+            }
+        }
+        if let Some(f) = chosen {
+            self.filter = f;
+        }
+
+        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            ui.add_space(2.0);
+            ui.label(RichText::new(format!("CraftCraft {}", env!("CARGO_PKG_VERSION"))).small().color(p.subtle));
+            let (text, color) = if self.checking_catalog {
+                ("Checking the catalog…".to_string(), p.subtle)
+            } else if self.checking_releases {
+                ("Checking for updates…".to_string(), p.subtle)
+            } else if self.catalog_error.is_some() {
+                ("Catalog check failed".to_string(), ui.visuals().warn_fg_color)
+            } else if self.state.last_check > 0 {
+                (format!("Checked {}", ago(now() - self.state.last_check)), p.subtle)
+            } else {
+                (String::new(), p.subtle)
+            };
+            let status = ui.label(RichText::new(text).small().color(color));
+            if let Some(e) = &self.catalog_error {
+                status.on_hover_text(e);
+            }
+            if let Some(until) = self.worker.releases.rate_limited_until() {
+                ui.label(RichText::new(format!("GitHub limit reached; resumes in {}", minutes(until - now()))).small().color(p.subtle))
+                    .on_hover_text("Set GITHUB_TOKEN to a GitHub token to raise the limit from 60 to 5,000 requests an hour.");
+            }
+            ui.add_space(6.0);
+            if nav_item(ui, p, "⚙  Settings", 0, self.show_settings, false) {
+                self.show_settings = !self.show_settings;
+            }
+        });
+    }
+
+    fn page_header(&mut self, ui: &mut egui::Ui, p: Palette) {
+        let (title, subtitle) = match &self.filter {
+            Filter::All => ("All apps".to_string(), self.catalog.as_ref().map(|c| c.tagline.clone()).unwrap_or_default()),
+            Filter::Installed => ("Installed".to_string(), "Apps on this computer, whether CraftCraft installed them or not.".to_string()),
+            Filter::Updates => ("Updates".to_string(), "Newer versions of apps you have.".to_string()),
+            Filter::Category(id) => {
+                let name = self.catalog.as_ref().and_then(|c| c.categories.iter().find(|c| &c.id == id)).map_or(id.clone(), |c| c.name.clone());
+                (name, String::new())
+            }
+        };
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(title).family(theme::strong()).size(26.0).color(p.ink));
+                if !subtitle.is_empty() {
+                    ui.label(RichText::new(subtitle).color(p.muted));
+                }
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(8.0);
+                let busy = self.checking_catalog || self.checking_releases;
+                let check = ui.add_enabled(!busy, egui::Button::new(if busy { "Checking…" } else { "⟳  Check for updates" }).min_size(Vec2::new(0.0, 36.0)));
+                if check.clicked() {
+                    self.check_now();
+                }
+                Frame::new()
+                    .fill(p.surface)
+                    .stroke(Stroke::new(1.0, p.line_strong))
+                    .corner_radius(CornerRadius::same(10))
+                    .inner_margin(Margin::symmetric(10, 7))
+                    .show(ui, |ui| {
+                        // The header lays out right to left; the search box itself reads left to right.
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            ui.label(RichText::new("🔍").color(p.subtle));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.search).hint_text("Search: Photoshop, grep, CAD…").frame(Frame::NONE).desired_width(220.0),
+                            );
+                        });
+                    });
+            });
+        });
+        ui.add_space(18.0);
+    }
+
+    fn banners(&mut self, ui: &mut egui::Ui, p: Palette) {
+        let Some(catalog) = self.catalog.clone() else {
+            ui.vertical_centered(|ui| {
+                ui.add_space(120.0);
+                match &self.catalog_error {
+                    Some(e) => {
+                        ui.label(RichText::new("Couldn't load the app catalog").family(theme::strong()).size(18.0));
+                        ui.label(RichText::new(e).color(p.muted));
+                        ui.add_space(8.0);
+                        if primary(ui, p, "Try again").clicked() {
+                            self.check_now();
+                        }
+                    }
+                    None => {
+                        ui.spinner();
+                        ui.label(RichText::new("Loading the app catalog…").color(p.muted));
+                    }
+                }
+            });
+            return;
+        };
+
+        if version::is_newer(&catalog.launcher.version, env!("CARGO_PKG_VERSION")) && crate::catalog::valid_repo(&catalog.launcher.repo) {
+            let text = format!("CraftCraft {} is available. You have {}.", catalog.launcher.version, env!("CARGO_PKG_VERSION"));
+            if banner(ui, p, p.action, "⬆", &text, None, &["Download"]).is_some() {
+                system::open_url(&format!("https://github.com/{}/releases/latest", catalog.launcher.repo));
+            }
+        }
+
+        let new_apps = self.state.new_apps(&catalog);
+        if !new_apps.is_empty() {
+            let names: Vec<_> = new_apps.iter().filter_map(|id| catalog.app(id)).map(|a| a.name.as_str()).collect();
+            let text = if names.len() == 1 { format!("New in the catalog: {}", names[0]) } else { format!("{} new apps: {}", names.len(), names.join(", ")) };
+            if banner(ui, p, Color32::from_rgb(0x3b, 0x82, 0xf6), "✦", &text, None, &["Got it"]).is_some() {
+                self.state.mark_all_seen(&catalog);
+                self.state.save(&self.paths);
+            }
+        }
+
+        let notices: Vec<_> = catalog.notices.iter().filter(|n| !self.state.dismissed_notices.contains(&n.id)).collect();
+        for notice in notices {
+            let body = (!notice.body.is_empty()).then_some(notice.body.as_str());
+            let buttons: &[&str] = if notice.url.is_some() { &["Dismiss", "Learn more"] } else { &["Dismiss"] };
+            match banner(ui, p, p.subtle, "ℹ", &notice.title, body, buttons) {
+                Some(0) => {
+                    self.state.dismissed_notices.insert(notice.id.clone());
+                    self.state.save(&self.paths);
+                }
+                Some(_) => system::open_url(notice.url.as_deref().unwrap_or_default()),
+                None => {}
+            }
+        }
+    }
+
+    fn grid(&mut self, ui: &mut egui::Ui, p: Palette) {
+        let Some(catalog) = self.catalog.clone() else { return };
+        let new_apps: HashSet<String> = self.state.new_apps(&catalog).into_iter().collect();
+        let apps: Vec<&App> = catalog.apps.iter().filter(|a| self.matches(a)).collect();
+        if apps.is_empty() {
+            ui.add_space(60.0);
+            ui.vertical_centered(|ui| {
+                let text = match self.filter {
+                    Filter::Installed => "Nothing installed yet. Pick something from All apps.",
+                    Filter::Updates => "Everything is up to date.",
+                    _ => "No apps match.",
+                };
+                ui.label(RichText::new(text).color(p.muted));
+            });
+            return;
+        }
+        let width = ui.available_width();
+        let columns = ((width + GAP) / (CARD_MIN_WIDTH + GAP)).floor().max(1.0) as usize;
+        let card_width = (width - GAP * (columns as f32 - 1.0)) / columns as f32;
+        for row in apps.chunks(columns) {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = GAP;
+                for app in row {
+                    self.card(ui, p, app, card_width, new_apps.contains(&app.id));
+                }
+            });
+            ui.add_space(GAP - ui.spacing().item_spacing.y);
+        }
+    }
+
+    fn card(&mut self, ui: &mut egui::Ui, p: Palette, app: &App, width: f32, is_new: bool) {
+        let size = Vec2::new(width, CARD_HEIGHT);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+        let hovered = response.hovered();
+        ui.painter().rect(
+            rect,
+            CornerRadius::same(14),
+            if hovered { p.hover } else { p.surface },
+            Stroke::new(1.0, if hovered { p.line_strong } else { p.line }),
+            egui::StrokeKind::Inside,
+        );
+        let inner = rect.shrink(18.0);
+        let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)));
+        let ui = &mut ui;
+        ui.spacing_mut().item_spacing = Vec2::new(8.0, 4.0);
+
+        ui.horizontal(|ui| {
+            self.icon(ui, p, app, 46.0);
+            ui.add_space(4.0);
+            ui.vertical(|ui| {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&app.name).family(theme::strong()).size(16.5).color(p.ink));
+                    if is_new {
+                        pill(ui, "NEW", p.action, Color32::WHITE);
+                    }
+                });
+                let mut job = LayoutJob::default();
+                job.append("Replaces ", 0.0, TextFormat::simple(FontId::proportional(12.5), p.subtle));
+                job.append(&app.replaces_text(), 0.0, TextFormat::simple(FontId::new(12.5, theme::strong()), p.muted));
+                ui.label(job);
+            });
+        });
+        ui.add_space(8.0);
+        ui.label(RichText::new(&app.tagline).family(theme::strong()).size(14.0).color(p.ink));
+        if !app.description.is_empty() {
+            let mut job = LayoutJob::single_section(app.description.clone(), TextFormat::simple(FontId::proportional(12.5), p.muted));
+            job.wrap.max_rows = 2;
+            job.wrap.max_width = inner.width();
+            ui.label(job);
+        }
+
+        // The footer sits on the card's bottom edge whatever the text above.
+        let foot = egui::Rect::from_min_max(egui::pos2(inner.left(), inner.bottom() - 32.0), inner.max);
+        ui.painter().hline(rect.x_range().shrink(1.0), foot.top() - 12.0, Stroke::new(1.0, p.line));
+        let mut foot_ui = ui.new_child(egui::UiBuilder::new().max_rect(foot).layout(Layout::left_to_right(Align::Center)));
+        self.card_footer(&mut foot_ui, p, app);
+    }
+
+    fn card_footer(&mut self, ui: &mut egui::Ui, p: Palette, app: &App) {
+        if let Some(busy) = self.busy.get(&app.id) {
+            match busy {
+                Busy::Working(Stage::Downloading { done, total }) => {
+                    let mb = |b: u64| b as f64 / 1_048_576.0;
+                    let (fraction, text) = match total {
+                        Some(t) if *t > 0 => (*done as f32 / *t as f32, format!("{:.0} of {:.0} MB", mb(*done), mb(*t))),
+                        _ => (0.0, format!("{:.1} MB", mb(*done))),
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(fraction)
+                            .text(RichText::new(text).small())
+                            .fill(p.action)
+                            .desired_width(ui.available_width())
+                            .desired_height(22.0)
+                            .corner_radius(CornerRadius::same(6)),
+                    );
+                }
+                Busy::Working(Stage::Installing) => spinner_label(ui, p, "Installing…"),
+                Busy::Working(Stage::Installer) => spinner_label(ui, p, "Finish in the installer window…"),
+                Busy::Removing => spinner_label(ui, p, "Removing…"),
+            }
+            return;
+        }
+        let Some(platform) = self.platform else { return };
+        let installed = self.managed(&app.id).cloned();
+        let shown = |v: &Option<String>| v.as_deref().map(version::display).map(|v| format!(" {v}")).unwrap_or_default();
+
+        // Left: where it stands.
+        let (status_text, status_color, hint) = match self.status(app) {
+            Status::NoBuild => ("Not available for this system".to_string(), p.subtle, None),
+            Status::Unknown => match self.releases.get(&app.id) {
+                Some(Lookup::Failed(e)) => ("Couldn't check releases".to_string(), p.subtle, Some(e.clone())),
+                Some(Lookup::NoRelease) => ("No release yet".to_string(), p.subtle, None),
+                _ => ("Checking…".to_string(), p.subtle, None),
+            },
+            Status::Available(r) => (format!("v{} · {}", version::display(&r.tag), r.date()), p.subtle, None),
+            Status::Installed { version, latest, external } => {
+                let current = if latest.is_some() && version.is_some() { " · up to date" } else { "" };
+                let hint = if external {
+                    Some("Found on this computer: installed outside CraftCraft.".to_string())
+                } else if installed.as_ref().is_some_and(|i| !i.verified) {
+                    Some("This download had no published SHA-256, so it couldn't be verified.".to_string())
+                } else {
+                    None
+                };
+                (format!("✔ Installed{}{current}", shown(&version)), p.good, hint)
+            }
+            Status::Update { from, to, .. } => (format!("Update:{} → {}", shown(&from), version::display(&to.tag)), p.accent, None),
+        };
+        if let Some(e) = self.app_errors.get(&app.id) {
+            ui.label(RichText::new("⚠ Failed").small().color(ui.visuals().error_fg_color)).on_hover_text(e);
+        } else {
+            let label = ui.label(RichText::new(status_text).small().color(status_color));
+            if let Some(hint) = hint {
+                label.on_hover_text(hint);
+            }
+        }
+
+        // Right: what you can do.
+        let open_label = if app.kind == Kind::Gui { "Open" } else { "Open in terminal" };
+        let (mut install, mut open) = (None, false);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.menu_button(RichText::new("⋯").size(16.0), |ui| self.more_menu(ui, app, installed.as_ref(), platform));
+            match self.status(app) {
+                Status::Available(r) => {
+                    if primary(ui, p, "Install").clicked() {
+                        install = Some(r.clone());
+                    }
+                }
+                Status::Update { to, external, .. } => {
+                    // An installer upgrades a system install in place; an archive can't replace a
+                    // copy someone else installed, so the launcher installs its own beside it.
+                    let separate = external && app.asset_for(platform).is_some_and(|(_, m)| m != Method::Installer);
+                    let button = primary(ui, p, if separate { "Install latest" } else { "Update" });
+                    let button = if separate {
+                        button.on_hover_text("This copy was installed outside CraftCraft (winget, cargo…). CraftCraft will install its own, up-to-date copy.")
+                    } else {
+                        button
+                    };
+                    if button.clicked() {
+                        install = Some(to.clone());
+                    }
+                    open = ui.button(open_label).clicked();
+                }
+                Status::Installed { .. } => open = ui.button(open_label).clicked(),
+                Status::Unknown | Status::NoBuild => {}
+            }
+        });
+        if let Some(release) = install {
+            self.start_install(app, release, platform);
+        }
+        if open {
+            self.open(app, installed.as_ref(), platform);
+        }
+    }
+
+    fn more_menu(&mut self, ui: &mut egui::Ui, app: &App, installed: Option<&Installed>, platform: Platform) {
+        ui.set_min_width(180.0);
+        if let Some(home) = &app.homepage
+            && ui.button("Website").clicked()
+        {
+            system::open_url(home);
+        }
+        if ui.button("Source code").clicked() {
+            system::open_url(&app.repo_url());
+        }
+        if let Some(Lookup::Found(r)) = self.releases.get(&app.id)
+            && ui.button(format!("Release notes ({})", version::display(&r.tag))).clicked()
+        {
+            let repo = app.repo_url();
+            system::open_url(if r.html_url.starts_with(&repo) { &r.html_url } else { &repo });
+        }
+        if let Status::Installed { latest: Some(r), external: true, .. } = self.status(app)
+            && app.asset_for(platform).is_some()
+            && ui.button("Reinstall latest").clicked()
+        {
+            let r = r.clone();
+            self.start_install(app, r, platform);
+        }
+        if let Some(i) = installed {
+            ui.separator();
+            if ui.button("Show files").clicked() {
+                system::reveal(&i.path);
+            }
+            if ui.button("Uninstall").clicked() {
+                self.busy.insert(app.id.clone(), Busy::Removing);
+                self.worker.uninstall(app.id.clone(), i.clone());
+            }
+        } else if let Some(found) = self.detected.get(&app.id).cloned() {
+            ui.separator();
+            if let Some(exe) = &found.exe
+                && ui.button("Show files").clicked()
+            {
+                system::reveal(exe);
+            }
+            if let Some(command) = found.uninstall {
+                if ui.button("Uninstall…").on_hover_text("Runs the app's own uninstaller.").clicked() {
+                    self.busy.insert(app.id.clone(), Busy::Removing);
+                    self.worker.uninstall_external(app.id.clone(), command);
+                }
+            } else if platform.os == crate::catalog::Os::Macos
+                && ui.button("Uninstall…").on_hover_text("Shows it in Applications; move it to the Bin.").clicked()
+            {
+                system::open_system_uninstall(platform.os);
+            }
+        }
+        ui.separator();
+        ui.label(RichText::new(format!("License: {}", app.license)).small().weak());
+    }
+
+    fn icon(&self, ui: &mut egui::Ui, p: Palette, app: &App, size: f32) {
+        if let Some(Icon::Ready(texture)) = self.icons.get(&app.id) {
+            ui.add(
+                egui::Image::from_texture(egui::load::SizedTexture::from_handle(texture))
+                    .fit_to_exact_size(Vec2::splat(size))
+                    .corner_radius(CornerRadius::same((size * 0.22) as u8)),
+            );
+            return;
+        }
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+        let [r, g, b] = app.rgb();
+        let color = Color32::from_rgb(r, g, b);
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same((size * 0.24) as u8), color);
+        if !matches!(self.icons.get(&app.id), Some(Icon::Loading)) {
+            painter.text(rect.center(), Align2::CENTER_CENTER, initials(&app.name), FontId::monospace(size * 0.34), Color32::WHITE);
+        }
+        let _ = p;
+    }
+
+    fn start_install(&mut self, app: &App, release: Release, platform: Platform) {
+        self.app_errors.remove(&app.id);
+        self.busy.insert(app.id.clone(), Busy::Working(Stage::Downloading { done: 0, total: None }));
+        self.worker.install(app.clone(), release, platform);
+    }
+
+    fn open(&mut self, app: &App, installed: Option<&Installed>, platform: Platform) {
+        match system::open_app(app, installed, self.detected.get(&app.id), &self.paths, platform) {
+            Ok(()) => {
+                self.app_errors.remove(&app.id);
+            }
+            Err(e) => {
+                self.app_errors.insert(app.id.clone(), e);
+            }
+        }
+    }
+
+    fn toast(&mut self, ctx: &egui::Context, p: Palette) {
+        let Some((text, at)) = &self.message else { return };
+        if at.elapsed() > Duration::from_secs(6) {
+            self.message = None;
+            return;
+        }
+        ctx.request_repaint_after(Duration::from_millis(500));
+        egui::Area::new(egui::Id::unique("craftcraft-toast")).anchor(Align2::RIGHT_BOTTOM, [-20.0, -20.0]).show(ctx, |ui| {
+            Frame::new()
+                .fill(p.surface2)
+                .stroke(Stroke::new(1.0, p.line_strong))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(Margin::symmetric(14, 10))
+                .shadow(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(60) })
+                .show(ui, |ui| {
+                    ui.label(RichText::new(text).color(p.ink));
+                });
+        });
+    }
+
+    fn settings(&mut self, ctx: &egui::Context, p: Palette) {
+        let mut open = self.show_settings;
+        egui::Window::new(RichText::new("Settings").family(theme::strong()).size(16.0))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(480.0)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(Frame::window(&ctx.global_style()).inner_margin(Margin::same(20)))
+            .show(ctx, |ui| {
+                ui.checkbox(&mut self.state.settings.auto_check, "Check for new apps and updates automatically");
+                if let Some(c) = &self.catalog {
+                    ui.label(RichText::new(format!("At start-up and every {} hours, as the catalog asks.", c.refresh_hours)).small().color(p.subtle));
+                }
+                ui.add_space(14.0);
+
+                ui.label(RichText::new("Command-line apps").family(theme::strong()));
+                ui.label(RichText::new("Terminal and command-line apps get a launcher in this folder:").small().color(p.muted));
+                ui.horizontal(|ui| {
+                    ui.monospace(self.paths.bin().display().to_string());
+                    if ui.small_button("Show").clicked() {
+                        system::reveal(&self.paths.bin());
+                    }
+                });
+                if system::bin_on_path(&self.paths) {
+                    ui.label(RichText::new("✔ It's on your PATH, so the commands work in any terminal.").small().color(p.good));
+                } else {
+                    #[cfg(windows)]
+                    if ui.button("Add it to my PATH").clicked() {
+                        match system::add_bin_to_path(&self.paths) {
+                            Ok(()) => self.flash("Added to PATH. New terminals will find the commands.".into()),
+                            Err(e) => self.flash(format!("Couldn't change PATH: {e}")),
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        ui.label(RichText::new("To use the commands in any terminal, add this to your shell profile:").small().color(p.muted));
+                        let mut line = system::path_line(&self.paths);
+                        ui.add(egui::TextEdit::singleline(&mut line).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+                    }
+                }
+                ui.add_space(14.0);
+
+                ui.label(RichText::new("Data folder").family(theme::strong()));
+                ui.horizontal(|ui| {
+                    ui.monospace(self.paths.root.display().to_string());
+                    if ui.small_button("Show").clicked() {
+                        system::reveal(&self.paths.root);
+                    }
+                });
+            });
+        if !open {
+            self.state.save(&self.paths);
+        }
+        self.show_settings = open;
+    }
+}
+
+fn section_label(ui: &mut egui::Ui, p: Palette, text: &str) {
+    ui.add_space(2.0);
+    ui.label(RichText::new(text.to_uppercase()).font(FontId::monospace(10.5)).color(p.subtle).extra_letter_spacing(1.2));
+    ui.add_space(2.0);
+}
+
+/// A sidebar row; returns whether it was clicked.
+fn nav_item(ui: &mut egui::Ui, p: Palette, label: &str, count: usize, selected: bool, highlight: bool) -> bool {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::click());
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(rect, CornerRadius::same(8), p.surface2);
+        painter.rect_filled(egui::Rect::from_min_size(rect.min + Vec2::new(0.0, 8.0), Vec2::new(3.0, 16.0)), CornerRadius::same(2), p.action);
+    } else if response.hovered() {
+        painter.rect_filled(rect, CornerRadius::same(8), p.hover);
+    }
+    let text_color = if selected { p.ink } else { p.muted };
+    let font = if selected { FontId::new(14.0, theme::strong()) } else { FontId::proportional(14.0) };
+    painter.text(rect.left_center() + Vec2::new(12.0, 0.0), Align2::LEFT_CENTER, label, font, text_color);
+    if count > 0 {
+        let right = rect.right_center() - Vec2::new(10.0, 0.0);
+        if highlight {
+            let galley = painter.layout_no_wrap(count.to_string(), FontId::monospace(11.0), Color32::WHITE);
+            let badge = egui::Rect::from_center_size(right - Vec2::new(galley.size().x / 2.0 + 4.0, 0.0), galley.size() + Vec2::new(12.0, 6.0));
+            painter.rect_filled(badge, CornerRadius::same(9), p.action);
+            painter.galley(badge.center() - galley.size() / 2.0, galley, Color32::WHITE);
+        } else {
+            painter.text(right, Align2::RIGHT_CENTER, count.to_string(), FontId::monospace(11.5), p.subtle);
+        }
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+fn primary(ui: &mut egui::Ui, p: Palette, text: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(RichText::new(text).family(theme::strong()).color(Color32::WHITE))
+            .fill(p.action)
+            .stroke(Stroke::NONE)
+            .min_size(Vec2::new(76.0, 30.0)),
+    )
+}
+
+fn spinner_label(ui: &mut egui::Ui, p: Palette, text: &str) {
+    ui.add(egui::Spinner::new().size(14.0).color(p.accent));
+    ui.label(RichText::new(text).small().color(p.muted));
+}
+
+/// A full-width notice with an icon, text and buttons (rightmost first); returns which was clicked.
+fn banner(ui: &mut egui::Ui, p: Palette, color: Color32, glyph: &str, title: &str, body: Option<&str>, buttons: &[&str]) -> Option<usize> {
+    let mut clicked = None;
+    Frame::new()
+        .fill(p.surface)
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.55)))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(Margin::symmetric(16, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+                ui.painter().rect_filled(rect, CornerRadius::same(7), color.gamma_multiply(0.22));
+                ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(14.0), color);
+                ui.add_space(4.0);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(title).family(theme::strong()).color(p.ink));
+                    if let Some(body) = body {
+                        ui.label(RichText::new(body).color(p.muted));
+                    }
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    for (i, button) in buttons.iter().enumerate() {
+                        if ui.button(*button).clicked() {
+                            clicked = Some(i);
+                        }
+                    }
+                });
+            });
+        });
+    ui.add_space(10.0);
+    clicked
+}
+
+fn pill(ui: &mut egui::Ui, text: &str, fill: Color32, color: Color32) {
+    Frame::new().fill(fill).corner_radius(CornerRadius::same(5)).inner_margin(Margin::symmetric(6, 2)).show(ui, |ui| {
+        ui.label(RichText::new(text).font(FontId::monospace(10.0)).color(color));
+    });
+}
+
+fn initials(name: &str) -> String {
+    let words: Vec<&str> = name.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let s: String = match words.as_slice() {
+        [a, b, ..] => a.chars().take(1).chain(b.chars().take(1)).collect(),
+        _ => name.chars().take(2).collect(),
+    };
+    s.to_uppercase()
+}
+
+/// The CraftCraft mark: two overlapping squares on an orange tile.
+fn logo(ui: &mut egui::Ui, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let painter = ui.painter();
+    let u = size / 32.0;
+    painter.rect_filled(rect, CornerRadius::same((7.0 * u) as u8), theme::DARK.action);
+    let back = egui::Rect::from_min_size(rect.min + Vec2::splat(7.0 * u), Vec2::splat(11.0 * u));
+    painter.rect_stroke(back, CornerRadius::same((2.5 * u) as u8), Stroke::new(2.6 * u, Color32::WHITE), egui::StrokeKind::Middle);
+    let front = egui::Rect::from_min_size(rect.min + Vec2::splat(14.0 * u), Vec2::splat(11.0 * u));
+    painter.rect_filled(front, CornerRadius::same((2.5 * u) as u8), Color32::WHITE);
+}
+
+fn ago(secs: i64) -> String {
+    match secs {
+        ..60 => "just now".into(),
+        60..3600 => format!("{} min ago", secs / 60),
+        3600..86_400 => format!("{} h ago", secs / 3600),
+        _ => format!("{} days ago", secs / 86_400),
+    }
+}
+
+fn minutes(secs: i64) -> String {
+    let m = (secs.max(0) + 59) / 60;
+    if m <= 1 { "a minute".into() } else { format!("{m} minutes") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monograms() {
+        assert_eq!(initials("ripgrep"), "RI");
+        assert_eq!(initials("uutils coreutils"), "UC");
+        assert_eq!(initials("Zed"), "ZE");
+    }
+}
