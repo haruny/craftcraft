@@ -1,0 +1,104 @@
+name: Release
+
+# Pushing a tag like v0.1.0 builds every platform, installs each build with the install scripts,
+# and publishes a GitHub release. Running it by hand (Actions > Release > Run workflow) does the
+# same without publishing: the builds are attached to the run as artifacts, for testing.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+          - { os: macos-latest, target: universal-apple-darwin }
+          # The oldest supported Ubuntu, so the builds run on older glibc too.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+    runs-on: ${{ matrix.os }}
+    name: build (${{ matrix.target }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          [ "${GITHUB_REF_NAME#v}" = "$version" ] || { echo "Tag $GITHUB_REF_NAME doesn't match Cargo.toml's version $version"; exit 1; }
+      - name: Linux windowing headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          rustup target add ${{ matrix.target }}
+          ./scripts/dist.ps1 -Target ${{ matrix.target }}
+      - name: Build (macOS, Linux)
+        if: runner.os != 'Windows'
+        run: sh scripts/dist.sh ${{ runner.os == 'Linux' && matrix.target || '' }}
+
+      - name: Install it with the install script (Windows)
+        if: runner.os == 'Windows'
+        env:
+          CRAFTCRAFT_DIST: ${{ github.workspace }}/dist
+          CRAFTCRAFT_NO_LAUNCH: "1"
+        shell: powershell # Windows PowerShell 5.1, what most people's computers run
+        run: |
+          ./install/install.ps1
+          $version = (Get-Item "$env:LOCALAPPDATA\Programs\CraftCraft\craftcraft.exe").VersionInfo.ProductVersion
+          if (-not $version) { throw 'the installed exe has no version' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $version -ne $env:GITHUB_REF_NAME.TrimStart('v')) { throw "installed $version, not $env:GITHUB_REF_NAME" }
+          if (-not (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\CraftCraft.lnk")) { throw 'no Start menu shortcut' }
+          & "$env:LOCALAPPDATA\Programs\CraftCraft\uninstall.ps1"
+          if (Test-Path "$env:LOCALAPPDATA\Programs\CraftCraft") { throw 'uninstall left files behind' }
+      - name: Install it with the install script (macOS, Linux)
+        if: runner.os != 'Windows'
+        env:
+          CRAFTCRAFT_DIST: ${{ github.workspace }}/dist
+          CRAFTCRAFT_NO_LAUNCH: "1"
+        run: |
+          sh install/install.sh
+          if [ "$RUNNER_OS" = macOS ]; then
+            exe="$HOME/Applications/CraftCraft.app/Contents/MacOS/craftcraft"
+            lipo -archs "$exe" | grep -q x86_64 && lipo -archs "$exe" | grep -q arm64
+          else
+            exe="$HOME/.local/bin/craftcraft"
+          fi
+          "$exe" --version | grep -q '^craftcraft [0-9]'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: craftcraft-${{ matrix.target }}
+          path: dist/craftcraft-*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: craftcraft-*
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS
+        working-directory: dist
+        run: sha256sum craftcraft-* > SHA256SUMS && cat SHA256SUMS
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "CraftCraft ${GITHUB_REF_NAME#v}" --generate-notes

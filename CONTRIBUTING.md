@@ -1,94 +1,70 @@
 # Contributing
 
-## Add your app to the catalog
+## Add an app
 
 Every app in CraftCraft comes from one file, [`catalog/catalog.json`](catalog/catalog.json). To add
-yours, open a pull request that adds an entry to it. Once it's merged, every launcher and the
+one, open a pull request that adds an entry to it. Once it's merged, every launcher and the
 [website](https://haruny.github.io/craftcraft-site/) pick it up within a few hours, with no new
 launcher release.
 
-An app fits the catalog when it:
+**The quick way:** point your AI agent (Claude Code, Codex, Cursor…) at
+[ADD_APP.md](ADD_APP.md) and give it the app's GitHub repository:
 
-- is a Rust rewrite of, or a Rust alternative to, software people already know;
-- is open source, on GitHub;
-- publishes ready-to-run builds as files on its **GitHub Releases** (the launcher installs only
-  from there, and checks each file against the SHA-256 GitHub shows for it);
-- works: people should be able to install it and use it for the thing it replaces.
+> Follow https://github.com/haruny/craftcraft/blob/main/ADD_APP.md to add github.com/OWNER/NAME to CraftCraft.
 
-### 1. Add an entry
+It checks the app qualifies, works out the entry from the repository and its latest release,
+checks it, and opens the pull request. To do it by hand, follow the same file: it's also the
+reference for every field.
 
-Add your app to the end of `apps` in `catalog/catalog.json`:
+### What qualifies
 
-```jsonc
+1. **It replaces paid software.** CraftCraft is for the Rust alternatives to software people pay
+   for: Photoshop, Office, AutoCAD, SolidWorks, TeamViewer. A rewrite of something already free,
+   like grep or VS Code, doesn't fit, however good it is.
+2. **It's open source, with its source on github.com.** The repository must be public and have an
+   open-source license file.
+3. **It publishes ready-to-run builds** as files on its GitHub Releases. The launcher installs
+   only from there, and checks each file against the SHA-256 GitHub shows for it.
+
+The check that runs on every pull request enforces rule 2 and the builds. A maintainer reviews
+rule 1, and installs the app before merging.
+
+### An entry
+
+Seven fields, plus `launch` when the download is an installer:
+
+```json
 {
-  "id": "ripgrep",                    // lowercase letters, digits and -; unique; also the install folder name
-  "name": "ripgrep",
-  "replaces": ["grep"],               // what it's a rewrite of
-  "category": "cli",                  // an id from "categories" at the top of the file
-  "kind": "cli",                      // gui: opens a window · tui: runs in a terminal · cli: a command
-  "tagline": "Search file contents, very fast",
-  "description": "…",                 // optional, a sentence or two
-  "repo": "BurntSushi/ripgrep",       // GitHub owner/name; installs come from its latest release
-  "homepage": "https://…",            // optional
-  "license": "MIT OR Unlicense",
-  "color": "#e11d48",                 // tile colour, used when there's no icon
-  "icon": "https://…/icon-128.png",   // optional; a square PNG or JPEG over https, 2 MB at most
-  "added": "2026-10-26",              // today; apps added in the last 30 days are marked New
-  "assets": {                         // which release file to use on each platform; * matches anything
-    "windows-x86_64": "ripgrep-*-x86_64-pc-windows-msvc.zip",
-    "macos-aarch64": "ripgrep-*-aarch64-apple-darwin.tar.gz",
-    "linux-x86_64": "ripgrep-*-x86_64-unknown-linux-musl.tar.gz"
+  "id": "rustdesk",
+  "name": "RustDesk",
+  "replaces": ["TeamViewer", "AnyDesk"],
+  "category": "utilities",
+  "tagline": "Remote desktop you can self-host",
+  "repo": "rustdesk/rustdesk",
+  "assets": {
+    "windows-x86_64": "rustdesk-*-x86_64.msi",
+    "macos-aarch64": "rustdesk-*-aarch64.dmg",
+    "linux-x86_64": "rustdesk-*-x86_64.AppImage"
   },
-  "bin": ["rg"]                       // executables inside the archive
+  "launch": {
+    "windows": "%ProgramFiles%\\RustDesk\\rustdesk.exe",
+    "macos": "/Applications/RustDesk.app"
+  }
 }
 ```
 
-Platforms are `windows-x86_64`, `windows-aarch64`, `macos-x86_64`, `macos-aarch64`,
-`linux-x86_64` and `linux-aarch64`. Leave out any you don't build for. Arm Windows and Arm Macs fall
-back to the x86_64 file when there's no Arm one.
-
-Use `*` for the version in file names (`myapp-*-linux.tar.gz`), so the entry keeps working when you
-publish a new release. Each pattern must match exactly one file in your latest release.
-
-How the launcher installs a file depends on its extension:
-
-| File | Method | What happens |
-|---|---|---|
-| `.zip`, `.tar.gz`, `.tgz`, `.tar.xz` | `archive` | Unpacked into the launcher's own apps folder. `bin` names the executables, and the first one is what **Open** runs. Command-line tools get a shim in the launcher's `bin` folder |
-| `.msi`, `.exe`, `.dmg`, `.pkg`, `.deb`, `.rpm` | `installer` | Downloaded, verified and handed to the system installer. Add `launch` with the installed path per OS (`%LOCALAPPDATA%`, `%ProgramFiles%` and `~` are expanded) so the launcher can find and open it |
-| `.AppImage` | `portable` | Kept as a single executable file |
-
-To override the guess, use an object: `{ "file": "Alacritty-*-portable.exe", "method": "portable" }`.
-
-**Desktop apps:** prefer your own installer (`.msi` on Windows, `.dmg` on macOS) and give its
-`launch` path:
-
-```jsonc
-"launch": {
-  "windows": "%ProgramFiles%\\PhotoCraft\\photocraft.exe",
-  "macos": "/Applications/PhotoCraft.app"
-}
-```
-
-The launcher then recognises copies people already installed, and updates upgrade them in place
-instead of adding a second copy. It finds installed apps by `name`, as Windows lists installed
-programs and as the macOS bundle is called (`/Applications/<name>.app`), so `name` should match
-what your installer registers.
-
-Your editor will autocomplete and check the entry: the file points at
+Each `assets` pattern matches exactly one file in the latest release, with `*` in place of the
+version. The license, star count and latest version come from GitHub, so they aren't in the entry.
+Your editor autocompletes and checks the entry, because the file points at
 [`catalog.schema.json`](catalog/catalog.schema.json).
 
-### 2. Check it
+### Check it
 
 ```sh
 node catalog/check.mjs --online   # needs Node 18+; GITHUB_TOKEN=… raises GitHub's rate limit
 ```
 
-`--online` checks that every pattern matches exactly one file in your current release, and warns
-when GitHub has no SHA-256 for a file (the launcher then installs it unverified, and says so). The
-same check runs on your pull request.
-
-To see your entry in the launcher before it's merged, run a debug build against your copy:
+To see the entry in the launcher before it's merged, run a debug build against your copy:
 
 ```sh
 CRAFTCRAFT_FEED=catalog/catalog.json CRAFTCRAFT_HOME=/tmp/craftcraft-test cargo run
@@ -96,15 +72,27 @@ CRAFTCRAFT_FEED=catalog/catalog.json CRAFTCRAFT_HOME=/tmp/craftcraft-test cargo 
 
 On Windows PowerShell: `$env:CRAFTCRAFT_FEED = "catalog\catalog.json"`, then `cargo run`.
 
-### 3. Open the pull request
+If a project renames its release files later, the daily check fails and we'll ask for the pattern
+to be updated.
 
-Change only your entry, and fill in the checklist in the pull request description. A maintainer
-installs the app before merging, because the launcher installs whatever the catalog says.
+## For maintainers
 
-If your release files are renamed later, the daily check fails and we'll ask you to update the
-pattern, so please keep watching the repository's notifications for your entry.
+| File | What it's for |
+|---|---|
+| `catalog/catalog.json` | The apps, categories, notices and launcher version. Contributors' pull requests change it |
+| `catalog/featured.json` | **Yours alone** (CODEOWNERS): the apps to feature, in order. They lead the Featured order in the launcher and on the website, with a Featured badge |
+| `catalog/publish.mjs` | Builds the published catalog: merges `featured.json` in, and fills in `added` and `color` where entries leave them out |
+| `catalog/releases.mjs` | Builds `releases.json`: every app's latest release (files and SHA-256s), stars and license |
+| `catalog/check.mjs` | The check run on pull requests and daily |
 
-## For maintainers: the rest of catalog.json
+Merging to `main` publishes to `https://haruny.github.io/craftcraft/`. `releases.json` is also
+rebuilt every hour, so launchers learn about new releases from that one file instead of each
+asking GitHub about every app.
+
+For CODEOWNERS to apply, turn on **Require review from Code Owners** in the `main` branch's
+protection rules.
+
+Other fields in `catalog.json`:
 
 - `refresh_hours` (1–168): how often launchers re-check the catalog.
 - `launcher.version`: the newest launcher release. Launchers older than this show an update banner,
@@ -115,9 +103,6 @@ pattern, so please keep watching the repository's notifications for your entry.
 - `updated`: bump it when you merge a change; the website shows it.
 - `schema`: the format version. Launchers refuse a catalog with a newer schema, so change it only
   for breaking changes, and only after a launcher that understands the new format has shipped.
-
-Merging to `main` runs the check and publishes the catalog to
-`https://haruny.github.io/craftcraft/catalog.json`.
 
 ## Changing the launcher
 

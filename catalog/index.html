@@ -18,16 +18,25 @@
     a { display: flex; justify-content: space-between; gap: 16px; padding: 14px 0; color: var(--fg); text-decoration: none; }
     a:hover { color: var(--accent); }
     small { color: var(--muted); font-size: .875rem; text-align: right; }
+    h2 { font-size: .8125rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; }
+    pre { margin: 0 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; font: 13px/1.5 ui-monospace, "Cascadia Code", Menlo, monospace; }
+    pre span { color: var(--muted); user-select: none; }
+    section { margin-bottom: 32px; }
   </style>
 </head>
 <body>
   <main>
     <h1>CraftCraft <span>catalog</span></h1>
-    <p>The list of Rust rewrites that the CraftCraft launcher installs. Launchers read it from this address every few hours.</p>
+    <p>Open-source Rust replacements for paid software, and the launcher that installs them. Launchers read the catalog from this address.</p>
+    <section>
+      <h2>Install CraftCraft</h2>
+      <pre><span>Windows (PowerShell)&#10;</span>irm https://haruny.github.io/craftcraft/install.ps1 | iex</pre>
+      <pre><span>macOS and Linux&#10;</span>curl -fsSL https://haruny.github.io/craftcraft/install.sh | sh</pre>
+    </section>
     <ul>
       <li><a href="catalog.json">catalog.json <small>the catalog</small></a></li>
-      <li><a href="https://github.com/haruny/craftcraft/releases/latest">Download CraftCraft <small>the launcher</small></a></li>
-      <li><a href="https://github.com/haruny/craftcraft/blob/main/CONTRIBUTING.md">Add your app <small>a pull request to catalog.json</small></a></li>
+      <li><a href="releases.json">releases.json <small>every app's latest release, hourly</small></a></li>
+      <li><a href="https://github.com/haruny/craftcraft/blob/main/CONTRIBUTING.md">Add your app <small>a pull request, or ask your AI agent</small></a></li>
       <li><a href="https://github.com/haruny/craftcraft">Source code <small>GitHub</small></a></li>
     </ul>
   </main>

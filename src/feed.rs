@@ -12,7 +12,7 @@ use crate::paths::{Paths, write_atomic};
 pub const FEED: &str = "https://haruny.github.io/craftcraft/catalog.json";
 
 pub enum FeedResult {
-    Updated(Parsed),
+    Updated(Box<Parsed>),
     Unchanged,
     Failed(String),
 }
@@ -55,7 +55,7 @@ fn fetch_inner(http: &Http, paths: &Paths, source: &str) -> Result<FeedResult, S
                     Some(etag) => write_atomic(&etag_file, etag.as_bytes()).map_err(|e| e.to_string())?,
                     None => _ = std::fs::remove_file(&etag_file),
                 }
-                return Ok(FeedResult::Updated(parsed));
+                return Ok(FeedResult::Updated(Box::new(parsed)));
             }
             Fetched::NotModified => return Ok(FeedResult::Unchanged),
             Fetched::NotFound => return Err(format!("no catalog at {source}")),
@@ -65,9 +65,23 @@ fn fetch_inner(http: &Http, paths: &Paths, source: &str) -> Result<FeedResult, S
         let path = source.strip_prefix("file://").unwrap_or(source);
         std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?
     };
-    let parsed = Catalog::parse(&text)?;
+    let mut parsed = Catalog::parse(&text)?;
+    // Publishing merges in featured.json; do the same for a local catalog, to preview it.
+    let featured = crate::index::source(source).replace("releases.json", "featured.json");
+    if parsed.catalog.featured.is_empty()
+        && let Ok(text) = std::fs::read_to_string(featured.strip_prefix("file://").unwrap_or(&featured))
+        && let Ok(f) = serde_json::from_str::<Featured>(&text)
+    {
+        parsed.catalog.featured = f.featured;
+    }
     // A local catalog isn't cached: the cache is the last good copy of the published one.
-    Ok(FeedResult::Updated(parsed))
+    Ok(FeedResult::Updated(Box::new(parsed)))
+}
+
+#[derive(serde::Deserialize)]
+struct Featured {
+    #[serde(default)]
+    featured: Vec<String>,
 }
 
 /// Remote catalogs must use https, except on this machine (a catalog served locally for testing).

@@ -1,0 +1,4 @@
+# Changes to these need a review from @haruny (with "Require review from Code Owners" turned on in
+# the main branch's protection rules).
+/catalog/featured.json @haruny
+/.github/ @haruny

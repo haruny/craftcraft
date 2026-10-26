@@ -11,6 +11,7 @@ mod feed;
 mod github;
 mod http;
 mod icons;
+mod index;
 mod install;
 mod paths;
 mod state;

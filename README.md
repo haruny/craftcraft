@@ -2,10 +2,31 @@
 
 **Well-known software, rewritten in Rust: one launcher to install, update and open them.**
 
-PhotoCraft instead of Photoshop, Zed instead of VS Code, BIMCraft instead of Revit, ripgrep instead
-of grep. CraftCraft is a small native app (Rust and egui, no Electron) that lists the Rust rewrites
-of the tools you already use, installs the right build for your computer, checks every download
+PhotoCraft instead of Photoshop, GridCraft instead of Excel, BIMCraft instead of Revit, RustDesk
+instead of TeamViewer. CraftCraft is a small native app (Rust and egui, no Electron) that lists
+open-source Rust replacements for the paid software you already use, installs the right build for your computer, checks every download
 against its published SHA-256, and tells you when there's an update or a new app in the catalog.
+
+## Install
+
+```powershell
+# Windows
+irm https://haruny.github.io/craftcraft/install.ps1 | iex
+```
+```sh
+# macOS and Linux
+curl -fsSL https://haruny.github.io/craftcraft/install.sh | sh
+```
+
+The script downloads the latest release for your system from
+[Releases](https://github.com/haruny/craftcraft/releases), checks its SHA-256, installs it for
+your user only (no admin rights), and opens it. Run it again to update.
+
+| | Installed to | Also |
+|---|---|---|
+| Windows | `%LOCALAPPDATA%\Programs\CraftCraft` | Start menu shortcut; listed in Settings → Apps, which uninstalls it |
+| macOS | `~/Applications/CraftCraft.app` | One build for Apple silicon and Intel |
+| Linux | `~/.local/bin/craftcraft` | Applications menu entry and icon |
 
 ## The catalog drives everything
 
@@ -26,10 +47,21 @@ It keeps the last good copy, so it opens instantly and works offline. When the c
 | A new app in `apps` | A "new in the catalog" banner and a NEW badge, until the user clicks **Got it** |
 | `launcher.version` newer than this build | An update banner with a download link |
 | A new entry in `notices` | A banner until dismissed |
-| A project publishes a release | **Update** on that app's card (each project's latest GitHub release is checked, also with ETags) |
+| A project publishes a release | **Update** on that app's card |
+| An app is listed in `featured.json` | It leads the default Featured order, with a Featured badge |
 
-**To add an app, send a pull request that adds it to `catalog/catalog.json`.**
-[CONTRIBUTING.md](CONTRIBUTING.md) describes the format and how to check an entry.
+**Releases come from one file, not from GitHub's API.** Every hour the catalog workflow gathers
+each app's latest release (files and SHA-256s), stars and license into
+`https://haruny.github.io/craftcraft/releases.json`. The launcher fetches that with an ETag next to
+the catalog, so checking every app for updates costs one request, however long the catalog gets,
+and nobody runs into GitHub's limit of 60 API requests an hour. Only an app the index doesn't
+cover yet (a local catalog being tested, say) is looked up on GitHub directly. Stars and release
+dates also drive the **Sort** menu: Featured, Most popular, Name and Recently updated.
+
+**To add an app, send a pull request that adds it to `catalog/catalog.json`**, or point an AI
+agent at [ADD_APP.md](ADD_APP.md) with the app's GitHub repository.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the rules: the app must replace paid software, and be open
+source on github.com.
 
 The catalog address is fixed: release builds always read the published one, and there's no setting
 to change it.
@@ -95,13 +127,37 @@ cargo test -- --ignored      # also installs the real ripgrep from GitHub into a
 `craftcraft --check-catalog <catalog.json>` parses a catalog exactly as the launcher will and lists
 anything it would skip.
 
+## Releases
+
+Pushing a tag like `v0.2.0` (matching `version` in `Cargo.toml`) runs
+[release.yml](.github/workflows/release.yml). It builds Windows (x86_64, Arm), macOS (one universal
+`.app`) and Linux (x86_64, Arm) on their own runners, installs each build with the install script
+to test it, and publishes a GitHub release with the packages and a `SHA256SUMS` file. Running the
+workflow by hand does everything except publish: the builds are attached to the run, for testing.
+After a release, bump `launcher.version` in the catalog so older launchers offer the update.
+
+To build and try a package locally, the way users get it:
+
+```powershell
+./scripts/dist.ps1                                   # Windows: dist/craftcraft-windows-<arch>.zip
+$env:CRAFTCRAFT_DIST = "$PWD\dist"; ./install/install.ps1
+```
+```sh
+sh scripts/dist.sh                                   # macOS or Linux
+CRAFTCRAFT_DIST="$PWD/dist" sh install/install.sh
+```
+
 ## Layout
 
 ```
-catalog/         catalog.json, its JSON Schema, and check.mjs, which CI runs on every change
+catalog/         catalog.json and featured.json; check.mjs (CI runs it on every change); publish.mjs
+                 and releases.mjs, which build what's published (catalog.json, releases.json)
+install/         install.ps1 and install.sh, the one-line installers
+scripts/         dist.ps1 and dist.sh, which build and package a release
+src/index.rs     the release index: every app's latest release and stars, in one file
 src/catalog.rs   the catalog format: parsing, validation, platforms, picking a release file
 src/feed.rs      fetching and caching the catalog
-src/github.rs    each app's latest release, ETag-cached, rate-limit aware
+src/github.rs    an app's latest release from GitHub's API, for apps the index doesn't cover
 src/detect.rs    finding apps already installed (registry, app bundles, packages, PATH)
 src/install.rs   download, verify, unpack, swap in, shims, uninstall
 src/system.rs    opening apps, terminals, folders and links; PATH

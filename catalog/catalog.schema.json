@@ -43,6 +43,11 @@
         "additionalProperties": false
       }
     },
+    "featured": {
+      "type": "array",
+      "description": "Added when publishing, from featured.json: app ids to feature, in order. Don't set it in catalog.json.",
+      "items": { "$ref": "#/$defs/id" }
+    },
     "notices": {
       "type": "array",
       "description": "Announcements shown in the launcher until dismissed.",
@@ -91,7 +96,7 @@
     },
     "app": {
       "type": "object",
-      "required": ["id", "name", "replaces", "category", "kind", "tagline", "repo", "license", "color", "added", "assets"],
+      "required": ["id", "name", "replaces", "category", "tagline", "repo", "assets"],
       "properties": {
         "id": { "$ref": "#/$defs/id" },
         "name": { "type": "string" },
@@ -99,16 +104,16 @@
         "category": { "$ref": "#/$defs/id", "description": "One of the ids in `categories`." },
         "kind": {
           "enum": ["gui", "tui", "cli"],
-          "description": "gui: opens a window. tui: opens in a terminal. cli: a command to use from a terminal."
+          "description": "Optional, gui by default. gui: opens a window. tui: opens in a terminal. cli: a command to use from a terminal."
         },
         "tagline": { "type": "string" },
         "description": { "type": "string" },
         "repo": { "$ref": "#/$defs/repo" },
         "homepage": { "type": "string", "pattern": "^https://" },
-        "license": { "type": "string" },
-        "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$", "description": "Tile colour, used when there is no icon." },
+        "license": { "type": "string", "description": "Optional: read from the GitHub repository when left out." },
+        "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$", "description": "Optional tile colour, used when there is no icon; one is picked from the id when left out." },
         "icon": { "type": "string", "pattern": "^https://", "description": "A square PNG or JPEG, ideally 128–256 px." },
-        "added": { "$ref": "#/$defs/date" },
+        "added": { "$ref": "#/$defs/date", "description": "Optional: filled in when publishing, from the day the entry was merged." },
         "assets": {
           "type": "object",
           "minProperties": 1,

@@ -139,30 +139,34 @@ impl Releases {
 /// Reads GitHub's answer, keeping only downloads that really belong to `repo`'s releases.
 fn parse_release(text: &str, repo: &str) -> Result<Release, String> {
     let gh: GhRelease = serde_json::from_str(text).map_err(|e| format!("unexpected answer from GitHub: {e}"))?;
-    let prefix = format!("https://github.com/{repo}/releases/download/").to_ascii_lowercase();
     let assets = gh
         .assets
         .into_iter()
-        .filter(|a| {
-            let url = a.browser_download_url.to_ascii_lowercase();
-            url.starts_with(&prefix) && !url.contains("/../") && !url.contains(['?', '#', '\\'])
-        })
         .map(|a| Asset {
-            sha256: a
-                .digest
-                .as_deref()
-                .and_then(|d| d.strip_prefix("sha256:"))
-                .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
-                .map(str::to_ascii_lowercase),
+            sha256: a.digest.as_deref().and_then(|d| d.strip_prefix("sha256:")).map(str::to_string),
             name: a.name,
             size: a.size,
             url: a.browser_download_url,
         })
         .collect();
-    Ok(Release { tag: gh.tag_name, published_at: gh.published_at.unwrap_or_default(), html_url: gh.html_url, assets })
+    Ok(Release { tag: gh.tag_name, published_at: gh.published_at.unwrap_or_default(), html_url: gh.html_url, assets }.for_repo(repo))
 }
 
 impl Release {
+    /// Keeps only downloads from `repo`'s own releases, and only well-formed SHA-256s. Applied to
+    /// every release, whether it came from GitHub or from the release index.
+    pub fn for_repo(mut self, repo: &str) -> Self {
+        let prefix = format!("https://github.com/{repo}/releases/download/").to_ascii_lowercase();
+        self.assets.retain(|a| {
+            let url = a.url.to_ascii_lowercase();
+            url.starts_with(&prefix) && !url.contains("/../") && !url.contains(['?', '#', '\\'])
+        });
+        for a in &mut self.assets {
+            a.sha256 = a.sha256.take().filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())).map(|h| h.to_ascii_lowercase());
+        }
+        self
+    }
+
     /// The one file matching `pattern`.
     pub fn pick(&self, pattern: &str) -> Result<&Asset, String> {
         let mut hits = self.assets.iter().filter(|a| glob_match(pattern, &a.name));

@@ -28,6 +28,10 @@ pub struct Catalog {
     pub notices: Vec<Notice>,
     #[serde(default)]
     pub apps: Vec<App>,
+    /// App ids to feature, in order: the maintainers' picks from featured.json, merged in when
+    /// the catalog is published.
+    #[serde(default)]
+    pub featured: Vec<String>,
 }
 
 fn default_refresh_hours() -> u32 {
@@ -62,6 +66,7 @@ pub struct App {
     pub name: String,
     pub replaces: Vec<String>,
     pub category: String,
+    #[serde(default)]
     pub kind: Kind,
     pub tagline: String,
     #[serde(default)]
@@ -86,10 +91,11 @@ pub struct App {
     pub launch: Launch,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
-    /// Opens a window.
+    /// Opens a window. The default: most apps are desktop apps.
+    #[default]
     Gui,
     /// Runs full-screen in a terminal.
     Tui,

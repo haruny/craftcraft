@@ -2,8 +2,8 @@
 // Checks catalog.json before it is published.
 //
 //   node catalog/check.mjs                    structure and cross-references
-//   node catalog/check.mjs --online           also checks every asset pattern against the app's
-//                                             latest GitHub release (set GITHUB_TOKEN in CI)
+//   node catalog/check.mjs --online           also checks each app is open source on GitHub, and every asset pattern against its
+//                                             latest release (set GITHUB_TOKEN in CI)
 
 import { readFile } from "node:fs/promises";
 
@@ -61,13 +61,13 @@ for (const [i, app] of (catalog.apps ?? []).entries()) {
   if (!ID.test(app.id ?? "")) err(at, "invalid id");
   if (ids.has(app.id)) err(at, "duplicate id");
   ids.add(app.id);
-  for (const key of ["name", "tagline", "license"]) if (!app[key]) err(at, `missing ${key}`);
+  for (const key of ["name", "tagline"]) if (!app[key]) err(at, `missing ${key}`);
   if (!Array.isArray(app.replaces) || app.replaces.length === 0) err(at, "replaces must list at least one program");
   if (!categories.has(app.category)) err(at, `unknown category "${app.category}"`);
-  if (!KINDS.includes(app.kind)) err(at, `kind must be one of ${KINDS.join(", ")}`);
+  if (app.kind !== undefined && !KINDS.includes(app.kind)) err(at, `kind must be one of ${KINDS.join(", ")}`);
   if (!REPO.test(app.repo ?? "")) err(at, "repo must be owner/name");
-  if (!COLOR.test(app.color ?? "")) err(at, "color must be #rrggbb");
-  if (!DATE.test(app.added ?? "")) err(at, "added must be YYYY-MM-DD");
+  if (app.color !== undefined && !COLOR.test(app.color)) err(at, "color must be #rrggbb");
+  if (app.added !== undefined && !DATE.test(app.added)) err(at, "added must be YYYY-MM-DD");
   if (app.homepage && !app.homepage.startsWith("https://")) err(at, "homepage must be https");
   if (app.icon && !app.icon.startsWith("https://")) err(at, "icon must be https");
   if (app.icon && !/\.(png|jpe?g)$|^https:\/\/avatars\.githubusercontent\.com\//i.test(app.icon)) err(at, "icon must be a PNG or JPEG");
@@ -86,6 +86,16 @@ for (const [i, app] of (catalog.apps ?? []).entries()) {
     const os = platform.split("-")[0];
     if (m === "installer" && !app.launch?.[os]) warnings.push(`${at}.${platform}: installer without launch.${os}, so the launcher can't open or detect it`);
   }
+}
+
+// Featuring is the maintainers' call: it lives in featured.json and is merged in when publishing.
+if ("featured" in catalog) err("featured", "goes in featured.json, not catalog.json");
+try {
+  const { featured } = JSON.parse(await readFile(new URL("./featured.json", import.meta.url), "utf8"));
+  if (!Array.isArray(featured)) err("featured.json", "needs a \"featured\" list of app ids");
+  else for (const id of featured) if (!catalog.apps?.some((a) => a.id === id)) err("featured.json", `no app "${id}" in catalog.json`);
+} catch (e) {
+  err("featured.json", e.message);
 }
 
 if (online) await checkReleases();
@@ -116,6 +126,18 @@ async function checkReleases() {
       if (!icon.ok) err(`${app.id}.icon`, `HTTP ${icon.status}`);
       else if (!/^image\/(png|jpeg)/.test(icon.headers.get("content-type") ?? "")) err(`${app.id}.icon`, `served as ${icon.headers.get("content-type")}`);
     }
+    // Rule 2: open source, with its source on github.com. A private or missing repo is a 404.
+    const repo = await fetch(`https://api.github.com/repos/${app.repo}`, { headers });
+    if (!repo.ok) {
+      err(app.id, `GitHub said ${repo.status} for ${app.repo}: the source must be in a public GitHub repository`);
+      continue;
+    }
+    const info = await repo.json();
+    if (info.full_name.toLowerCase() !== app.repo.toLowerCase()) err(`${app.id}.repo`, `${app.repo} has moved to ${info.full_name}`);
+    if (!info.license) err(`${app.id}.repo`, `${app.repo} has no license file, so it isn't open source`);
+    else if (info.license.spdx_id === "NOASSERTION") warnings.push(`${app.id}.repo: GitHub doesn't recognise ${app.repo}'s license; check it's an open-source one`);
+    if (info.archived) warnings.push(`${app.id}.repo: ${app.repo} is archived`);
+
     const res = await fetch(`https://api.github.com/repos/${app.repo}/releases/latest`, { headers });
     if (!res.ok) {
       err(app.id, `GitHub said ${res.status} for ${app.repo}`);

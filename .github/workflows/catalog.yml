@@ -3,11 +3,13 @@ name: Catalog
 on:
   push:
     branches: [main]
-    paths: ["catalog/**", ".github/workflows/catalog.yml"]
+    paths: ["catalog/**", "install/**", ".github/workflows/catalog.yml"]
   pull_request:
-    paths: ["catalog/**", ".github/workflows/catalog.yml"]
+    paths: ["catalog/**", "install/**", ".github/workflows/catalog.yml"]
   schedule:
-    # Daily: catch apps whose new releases renamed their files.
+    # Hourly: rebuild releases.json, so launchers hear about new releases within the hour.
+    - cron: "23 * * * *"
+    # Daily: also check every app's release files still match the catalog's patterns.
     - cron: "17 6 * * *"
   workflow_dispatch:
 
@@ -20,21 +22,30 @@ concurrency:
 
 jobs:
   check:
+    if: github.event_name != 'schedule' || github.event.schedule == '17 6 * * *'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Check catalog.json against the apps' latest releases
+      - name: Check catalog.json against the apps' repositories and latest releases
         run: node catalog/check.mjs --online
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Lint the shell scripts
+        run: shellcheck install/install.sh scripts/dist.sh
 
-  # Publishes https://haruny.github.io/craftcraft/catalog.json, which every launcher polls.
+  # Publishes to https://haruny.github.io/craftcraft/: catalog.json (with featured.json merged in),
+  # which every launcher polls; releases.json, every app's latest release and stars; and the
+  # install scripts.
   deploy:
     needs: check
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # A push publishes only a catalog that passed the check. The scheduled runs publish anyway: one
+    # project renaming its files shouldn't hold back everyone else's updates.
+    if: >-
+      !cancelled() && github.event_name != 'pull_request' &&
+      (needs.check.result == 'success' || github.event_name == 'schedule')
     runs-on: ubuntu-latest
     permissions:
       pages: write
@@ -44,10 +55,20 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - name: Collect the catalog
+        with:
+          fetch-depth: 0 # publish.mjs dates new apps from catalog.json's history
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Collect the files
         run: |
           mkdir _site
-          cp catalog/catalog.json catalog/catalog.schema.json catalog/index.html _site/
+          node catalog/publish.mjs _site
+          cp install/install.ps1 install/install.sh _site/
+      - name: Gather every app's latest release and stars
+        run: node catalog/releases.mjs _site/releases.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/upload-pages-artifact@v3
       - id: deployment
         uses: actions/deploy-pages@v4

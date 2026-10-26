@@ -29,11 +29,39 @@ pub struct State {
 pub struct Settings {
     /// Check the catalog and releases automatically.
     pub auto_check: bool,
+    pub sort: Sort,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { auto_check: true }
+        Self { auto_check: true, sort: Sort::Featured }
+    }
+}
+
+/// The order apps are listed in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sort {
+    /// The catalog's own order.
+    #[default]
+    Featured,
+    /// Most GitHub stars first.
+    Popular,
+    Name,
+    /// Newest release first.
+    Updated,
+}
+
+impl Sort {
+    pub const ALL: [Sort; 4] = [Sort::Featured, Sort::Popular, Sort::Name, Sort::Updated];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Sort::Featured => "Featured",
+            Sort::Popular => "Most popular",
+            Sort::Name => "Name",
+            Sort::Updated => "Recently updated",
+        }
     }
 }
 

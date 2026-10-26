@@ -1,0 +1,4 @@
+{
+  "$comment": "Maintainers only: the apps to feature, in order. They lead the launcher's and the website's Featured order and get a Featured badge. Ids must be in catalog.json.",
+  "featured": ["photocraft", "solidcraft", "bimcraft"]
+}

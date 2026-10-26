@@ -11,19 +11,37 @@ use crate::detect::{self, Detected};
 use crate::feed::{self, FeedResult};
 use crate::github::{Lookup, Release, Releases};
 use crate::http::Http;
+use crate::index::{self, Index};
 use crate::install::{self, Stage};
 use crate::paths::Paths;
 use crate::state::Installed;
 
 pub enum Event {
     Catalog(FeedResult),
-    Release { id: String, lookup: Lookup },
+    Release {
+        id: String,
+        lookup: Lookup,
+    },
     ReleasesChecked,
-    Progress { id: String, stage: Stage },
-    Installed { id: String, result: Result<Installed, String> },
-    Uninstalled { id: String, result: Result<(), String> },
-    Icon { id: String, image: Option<eframe::egui::ColorImage> },
+    Progress {
+        id: String,
+        stage: Stage,
+    },
+    Installed {
+        id: String,
+        result: Result<Installed, String>,
+    },
+    Uninstalled {
+        id: String,
+        result: Result<(), String>,
+    },
+    Icon {
+        id: String,
+        image: Option<eframe::egui::ColorImage>,
+    },
     Detected(HashMap<String, Detected>),
+    /// A newer release index; it always arrives before the catalog it belongs to.
+    Index(Index),
 }
 
 pub struct Worker {
@@ -58,8 +76,13 @@ impl Worker {
         }
     }
 
+    /// Fetches the release index, then the catalog: by the time the catalog arrives, the launcher
+    /// knows which apps' releases it still has to ask GitHub about.
     pub fn refresh_catalog(&self, source: String) {
         self.spawn("catalog", move |tx, http, paths, _| {
+            if let Some(i) = index::fetch(http, paths, &index::source(&source)) {
+                _ = tx.send(Event::Index(i));
+            }
             _ = tx.send(Event::Catalog(feed::fetch(http, paths, &source)));
         });
     }

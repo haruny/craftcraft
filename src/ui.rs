@@ -10,9 +10,10 @@ use crate::catalog::{App, Catalog, Kind, Method, Platform};
 use crate::detect::Detected;
 use crate::feed::{self, FeedResult};
 use crate::github::{Lookup, Release};
+use crate::index::{self, Index};
 use crate::install::{self, Stage};
 use crate::paths::Paths;
-use crate::state::{Installed, State};
+use crate::state::{Installed, Sort, State};
 use crate::theme::{self, Palette};
 use crate::worker::{Event, Worker};
 use crate::{now, system, version};
@@ -73,6 +74,8 @@ pub struct Launcher {
     releases: HashMap<String, Lookup>,
     /// Catalog apps found already installed on this computer.
     detected: HashMap<String, Detected>,
+    /// Every app's latest release and stars, from releases.json.
+    index: Index,
     busy: HashMap<String, Busy>,
     app_errors: HashMap<String, String>,
     icons: HashMap<String, Icon>,
@@ -82,6 +85,8 @@ pub struct Launcher {
     search: String,
     filter: Filter,
     show_settings: bool,
+    /// How tall the sidebar's bottom section was last frame, so the sections above can stop short of it.
+    sidebar_bottom: f32,
     message: Option<(String, Instant)>,
 }
 
@@ -91,6 +96,7 @@ impl Launcher {
         install::tidy(&paths);
         let worker = Worker::new(cc.egui_ctx.clone(), paths.clone());
         let state = State::load(&paths);
+        let release_index = index::cached(&paths);
         let catalog = feed::cached(&paths);
         let mut releases = HashMap::new();
         if let Some(c) = &catalog {
@@ -109,6 +115,7 @@ impl Launcher {
             catalog_error: None,
             releases,
             detected: HashMap::new(),
+            index: release_index,
             busy: HashMap::new(),
             app_errors: HashMap::new(),
             icons: HashMap::new(),
@@ -118,8 +125,10 @@ impl Launcher {
             search: String::new(),
             filter: Filter::All,
             show_settings: false,
+            sidebar_bottom: 120.0,
             message: None,
         };
+        launcher.apply_index();
         launcher.fetch_icons();
         launcher.detect();
         // Always look at start-up: with an ETag an unchanged catalog costs next to nothing.
@@ -156,9 +165,31 @@ impl Launcher {
         if self.checking_releases {
             return;
         }
-        let apps: Vec<_> = catalog.apps.iter().filter(|a| a.asset_for(platform).is_some()).map(|a| (a.id.clone(), a.repo.clone())).collect();
+        // The index covers the catalog's apps; GitHub is asked only about any it doesn't (yet).
+        let apps: Vec<_> = catalog
+            .apps
+            .iter()
+            .filter(|a| a.asset_for(platform).is_some() && !self.index.contains_key(&a.id))
+            .map(|a| (a.id.clone(), a.repo.clone()))
+            .collect();
+        if apps.is_empty() {
+            return;
+        }
         self.checking_releases = true;
         self.worker.check_releases(apps);
+    }
+
+    /// Takes each app's latest release from the index.
+    fn apply_index(&mut self) {
+        let Some(catalog) = &self.catalog else { return };
+        for app in &catalog.apps {
+            let lookup = match self.index.get(&app.id) {
+                Some(index::Entry { release: Some(r), .. }) => Lookup::Found(r.clone().for_repo(&app.repo)),
+                Some(_) => Lookup::NoRelease,
+                None => continue,
+            };
+            self.releases.insert(app.id.clone(), lookup);
+        }
     }
 
     /// Starts fetching icons the catalog names that aren't loaded or loading yet.
@@ -193,6 +224,7 @@ impl Launcher {
                 self.checking_catalog = false;
                 match result {
                     FeedResult::Updated(parsed) => {
+                        let parsed = *parsed;
                         for p in &parsed.problems {
                             eprintln!("catalog: {p}");
                         }
@@ -211,6 +243,7 @@ impl Launcher {
                         self.catalog_error = None;
                         self.state.last_check = now();
                         self.state.save(&self.paths);
+                        self.apply_index();
                         self.fetch_icons();
                         self.detect();
                         self.check_releases();
@@ -272,6 +305,10 @@ impl Launcher {
                 self.detect();
             }
             Event::Detected(found) => self.detected = found,
+            Event::Index(index) => {
+                self.index = index;
+                self.apply_index();
+            }
             Event::Icon { id, image } => {
                 let icon = match image {
                     Some(image) => Icon::Ready(ctx.load_texture(format!("icon-{id}"), image, egui::TextureOptions::LINEAR)),
@@ -319,6 +356,36 @@ impl Launcher {
         self.catalog.as_ref().map_or(0, |c| c.apps.iter().filter(|a| matches!(self.status(a), Status::Update { .. })).count())
     }
 
+    /// The latest release's date, `YYYY-MM-DD`.
+    fn released(&self, app: &App) -> Option<&str> {
+        match self.releases.get(&app.id) {
+            Some(Lookup::Found(r)) if !r.published_at.is_empty() => Some(r.date()),
+            _ => None,
+        }
+    }
+
+    fn stars(&self, app: &App) -> u64 {
+        self.index.get(&app.id).map_or(0, |e| e.stars)
+    }
+
+    fn is_featured(&self, app: &App) -> bool {
+        self.catalog.as_ref().is_some_and(|c| c.featured.contains(&app.id))
+    }
+
+    /// Puts `apps` in the chosen order. Sorts are stable, so ties keep the catalog's order.
+    fn sort(&self, apps: &mut [&App]) {
+        match self.state.settings.sort {
+            // The maintainers' picks first, in their order; then the catalog's.
+            Sort::Featured => {
+                let featured = self.catalog.as_ref().map(|c| c.featured.as_slice()).unwrap_or_default();
+                apps.sort_by_key(|a| featured.iter().position(|id| *id == a.id).unwrap_or(usize::MAX));
+            }
+            Sort::Popular => apps.sort_by_key(|a| std::cmp::Reverse(self.stars(a))),
+            Sort::Name => apps.sort_by_cached_key(|a| a.name.to_lowercase()),
+            Sort::Updated => apps.sort_by(|a, b| self.released(b).cmp(&self.released(a))),
+        }
+    }
+
     fn matches(&self, app: &App) -> bool {
         let filter_ok = match &self.filter {
             Filter::All => true,
@@ -360,6 +427,7 @@ impl eframe::App for Launcher {
             self.page_header(ui, p);
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 ui.set_max_width(ui.available_width() - 8.0);
+                ui.add_space(16.0);
                 self.banners(ui, p);
                 self.grid(ui, p);
                 ui.add_space(24.0);
@@ -382,36 +450,40 @@ impl Launcher {
         });
         ui.add_space(18.0);
 
-        let installed = self.catalog.as_ref().map_or(0, |c| c.apps.iter().filter(|a| self.is_installed(a)).count());
-        let updates = self.update_count();
-        let total = self.catalog.as_ref().map_or(0, |c| c.apps.len());
-        let mut chosen = None;
-        section_label(ui, p, "Library");
-        if nav_item(ui, p, "All apps", total, self.filter == Filter::All, false) {
-            chosen = Some(Filter::All);
-        }
-        if nav_item(ui, p, "Installed", installed, self.filter == Filter::Installed, false) {
-            chosen = Some(Filter::Installed);
-        }
-        if nav_item(ui, p, "Updates", updates, self.filter == Filter::Updates, updates > 0) {
-            chosen = Some(Filter::Updates);
-        }
-        if let Some(catalog) = &self.catalog {
-            ui.add_space(14.0);
-            section_label(ui, p, "Categories");
-            for c in &catalog.categories {
-                let n = catalog.apps.iter().filter(|a| a.category == c.id).count();
-                if n > 0 {
-                    let filter = Filter::Category(c.id.clone());
-                    if nav_item(ui, p, &c.name, n, self.filter == filter, false) {
-                        chosen = Some(filter);
+        // The sections scroll when the window is too short for them and the bottom of the sidebar.
+        let nav_height = (ui.available_height() - self.sidebar_bottom - 12.0).max(60.0);
+        egui::ScrollArea::vertical().id_salt("nav").max_height(nav_height).auto_shrink([false, true]).show(ui, |ui| {
+            let installed = self.catalog.as_ref().map_or(0, |c| c.apps.iter().filter(|a| self.is_installed(a)).count());
+            let updates = self.update_count();
+            let total = self.catalog.as_ref().map_or(0, |c| c.apps.len());
+            let mut chosen = None;
+            section_label(ui, p, "Library");
+            if nav_item(ui, p, "All apps", total, self.filter == Filter::All, false) {
+                chosen = Some(Filter::All);
+            }
+            if nav_item(ui, p, "Installed", installed, self.filter == Filter::Installed, false) {
+                chosen = Some(Filter::Installed);
+            }
+            if nav_item(ui, p, "Updates", updates, self.filter == Filter::Updates, updates > 0) {
+                chosen = Some(Filter::Updates);
+            }
+            if let Some(catalog) = &self.catalog {
+                ui.add_space(14.0);
+                section_label(ui, p, "Categories");
+                for c in &catalog.categories {
+                    let n = catalog.apps.iter().filter(|a| a.category == c.id).count();
+                    if n > 0 {
+                        let filter = Filter::Category(c.id.clone());
+                        if nav_item(ui, p, &c.name, n, self.filter == filter, false) {
+                            chosen = Some(filter);
+                        }
                     }
                 }
             }
-        }
-        if let Some(f) = chosen {
-            self.filter = f;
-        }
+            if let Some(f) = chosen {
+                self.filter = f;
+            }
+        });
 
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.add_space(2.0);
@@ -439,6 +511,11 @@ impl Launcher {
             if nav_item(ui, p, "⚙  Settings", 0, self.show_settings, false) {
                 self.show_settings = !self.show_settings;
             }
+            let busy = self.checking_catalog || self.checking_releases;
+            if nav_item(ui, p, if busy { "⟳  Checking…" } else { "⟳  Check for updates" }, 0, false, false) && !busy {
+                self.check_now();
+            }
+            self.sidebar_bottom = ui.min_rect().height();
         });
     }
 
@@ -452,37 +529,64 @@ impl Launcher {
                 (name, String::new())
             }
         };
+        ui.label(RichText::new(title).family(theme::strong()).size(26.0).color(p.ink));
+        if !subtitle.is_empty() {
+            ui.label(RichText::new(subtitle).color(p.muted));
+        }
+        ui.add_space(16.0);
+
+        // The toolbar: search on the left, how many apps and their order on the right.
+        let shown = self.catalog.as_ref().map_or(0, |c| c.apps.iter().filter(|a| self.matches(a)).count());
+        // In a narrow window the count and the "Sort" label give way to the search box.
+        let roomy = ui.available_width() >= 620.0;
         ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.label(RichText::new(title).family(theme::strong()).size(26.0).color(p.ink));
-                if !subtitle.is_empty() {
-                    ui.label(RichText::new(subtitle).color(p.muted));
-                }
-            });
+            self.search_box(ui, p, if roomy { 300.0 } else { 175.0 });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_space(8.0);
-                let busy = self.checking_catalog || self.checking_releases;
-                let check = ui.add_enabled(!busy, egui::Button::new(if busy { "Checking…" } else { "⟳  Check for updates" }).min_size(Vec2::new(0.0, 36.0)));
-                if check.clicked() {
-                    self.check_now();
+                let mut sort = self.state.settings.sort;
+                egui::ComboBox::from_id_salt("sort").selected_text(sort.label()).width(150.0).show_ui(ui, |ui| {
+                    for s in Sort::ALL {
+                        ui.selectable_value(&mut sort, s, s.label());
+                    }
+                });
+                if sort != self.state.settings.sort {
+                    self.state.settings.sort = sort;
+                    self.state.save(&self.paths);
                 }
-                Frame::new()
-                    .fill(p.surface)
-                    .stroke(Stroke::new(1.0, p.line_strong))
-                    .corner_radius(CornerRadius::same(10))
-                    .inner_margin(Margin::symmetric(10, 7))
-                    .show(ui, |ui| {
-                        // The header lays out right to left; the search box itself reads left to right.
-                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            ui.label(RichText::new("🔍").color(p.subtle));
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.search).hint_text("Search: Photoshop, grep, CAD…").frame(Frame::NONE).desired_width(220.0),
-                            );
-                        });
-                    });
+                if roomy {
+                    ui.label(RichText::new("Sort").color(p.subtle));
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(if shown == 1 { "1 app".to_string() } else { format!("{shown} apps") }).color(p.subtle));
+                }
             });
         });
-        ui.add_space(18.0);
+        ui.add_space(14.0);
+        let y = ui.cursor().top();
+        ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, p.line));
+        ui.add_space(1.0);
+    }
+
+    /// A search field of a sensible width, with a drawn magnifier (the emoji one clashes).
+    fn search_box(&mut self, ui: &mut egui::Ui, p: Palette, beside: f32) {
+        let width = (ui.available_width() - beside).clamp(140.0, 340.0);
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .hint_text("Search apps, or what they replace")
+                .margin(Margin { left: 34, right: 10, top: 8, bottom: 8 })
+                .desired_width(width),
+        );
+        let c = response.rect.left_center() + Vec2::new(17.0, -1.0);
+        let stroke = Stroke::new(1.6, if response.has_focus() { p.accent } else { p.subtle });
+        ui.painter().circle_stroke(c, 5.0, stroke);
+        ui.painter().line_segment([c + Vec2::splat(3.6), c + Vec2::splat(7.4)], stroke);
+        if !self.search.is_empty() {
+            let x = egui::Rect::from_center_size(response.rect.right_center() - Vec2::new(16.0, 0.0), Vec2::splat(20.0));
+            let clear = ui.interact(x, ui.scope_id().with("clear-search"), Sense::click()).on_hover_text("Clear");
+            let color = if clear.hovered() { p.ink } else { p.subtle };
+            ui.painter().text(x.center(), Align2::CENTER_CENTER, "✕", FontId::proportional(12.0), color);
+            if clear.clicked() {
+                self.search.clear();
+            }
+        }
     }
 
     fn banners(&mut self, ui: &mut egui::Ui, p: Palette) {
@@ -542,7 +646,8 @@ impl Launcher {
     fn grid(&mut self, ui: &mut egui::Ui, p: Palette) {
         let Some(catalog) = self.catalog.clone() else { return };
         let new_apps: HashSet<String> = self.state.new_apps(&catalog).into_iter().collect();
-        let apps: Vec<&App> = catalog.apps.iter().filter(|a| self.matches(a)).collect();
+        let mut apps: Vec<&App> = catalog.apps.iter().filter(|a| self.matches(a)).collect();
+        self.sort(&mut apps);
         if apps.is_empty() {
             ui.add_space(60.0);
             ui.vertical_centered(|ui| {
@@ -595,6 +700,9 @@ impl Launcher {
                     if is_new {
                         pill(ui, "NEW", p.action, Color32::WHITE);
                     }
+                    if self.is_featured(app) {
+                        pill(ui, "FEATURED", p.accent.gamma_multiply(0.16), p.accent);
+                    }
                 });
                 let mut job = LayoutJob::default();
                 job.append("Replaces ", 0.0, TextFormat::simple(FontId::proportional(12.5), p.subtle));
@@ -609,6 +717,11 @@ impl Launcher {
             job.wrap.max_rows = 2;
             job.wrap.max_width = inner.width();
             ui.label(job);
+        }
+
+        let stars = self.stars(app);
+        if stars > 0 {
+            stars_badge(ui, p, inner.right_top(), stars);
         }
 
         // The footer sits on the card's bottom edge whatever the text above.
@@ -765,8 +878,11 @@ impl Launcher {
                 system::open_system_uninstall(platform.os);
             }
         }
-        ui.separator();
-        ui.label(RichText::new(format!("License: {}", app.license)).small().weak());
+        let license = Some(app.license.as_str()).filter(|l| !l.is_empty()).or_else(|| self.index.get(&app.id).and_then(|e| e.license.as_deref()));
+        if let Some(license) = license {
+            ui.separator();
+            ui.label(RichText::new(format!("License: {license}")).small().weak());
+        }
     }
 
     fn icon(&self, ui: &mut egui::Ui, p: Palette, app: &App, size: f32) {
@@ -963,6 +1079,32 @@ fn banner(ui: &mut egui::Ui, p: Palette, color: Color32, glyph: &str, title: &st
         });
     ui.add_space(10.0);
     clicked
+}
+
+/// GitHub's star count, right-aligned at `top_right`.
+fn stars_badge(ui: &mut egui::Ui, p: Palette, top_right: egui::Pos2, stars: u64) {
+    let galley = ui.painter().layout_no_wrap(index::short(stars), FontId::proportional(12.5), p.muted);
+    let text_pos = egui::pos2(top_right.x - galley.size().x, top_right.y + 2.0);
+    let center = egui::pos2(text_pos.x - 9.0, text_pos.y + galley.size().y / 2.0);
+    let rect = egui::Rect::from_min_max(egui::pos2(center.x - 8.0, text_pos.y), egui::pos2(top_right.x, text_pos.y + galley.size().y));
+    ui.painter().add(star(center, 5.6, Color32::from_rgb(0xe3, 0xb3, 0x41)));
+    ui.painter().galley(text_pos, galley, p.muted);
+    ui.interact(rect, ui.scope_id().with(("stars", top_right.x as i32, top_right.y as i32)), Sense::hover()).on_hover_text(format!("{stars} stars on GitHub"));
+}
+
+/// A filled five-pointed star: a fan of triangles from its centre.
+fn star(center: egui::Pos2, radius: f32, color: Color32) -> egui::Shape {
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(center, color);
+    for i in 0..10 {
+        let r = if i % 2 == 0 { radius } else { radius * 0.45 };
+        let angle = std::f32::consts::PI * (i as f32 / 5.0 - 0.5);
+        mesh.colored_vertex(center + Vec2::angled(angle) * r, color);
+    }
+    for i in 1..=10u32 {
+        mesh.add_triangle(0, i, i % 10 + 1);
+    }
+    egui::Shape::mesh(mesh)
 }
 
 fn pill(ui: &mut egui::Ui, text: &str, fill: Color32, color: Color32) {
