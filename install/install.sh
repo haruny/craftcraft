@@ -76,7 +76,7 @@ main() {
         app="$apps/CraftCraft.app"
         exe="$app/Contents/MacOS/craftcraft"
         # Close a running copy, so opening it afterwards starts the new version.
-        pkill -f "^$exe" 2>/dev/null && sleep 1 || true
+        if pkill -f "^$exe" 2>/dev/null; then sleep 1; fi
         mkdir -p "$apps"
         rm -rf "$app.new"
         mv "$tmp/unpacked/CraftCraft.app" "$app.new"
@@ -87,7 +87,7 @@ main() {
         exe="$bin/craftcraft"
         data=${XDG_DATA_HOME:-$HOME/.local/share}
         mkdir -p "$bin" "$data/applications" "$data/icons/hicolor/scalable/apps"
-        pkill -f "^$exe" 2>/dev/null && sleep 1 || true
+        if pkill -f "^$exe" 2>/dev/null; then sleep 1; fi
         # Replace by renaming, which works even while the old binary is running.
         install -m 755 "$tmp/unpacked/craftcraft" "$exe.new"
         mv -f "$exe.new" "$exe"
@@ -102,7 +102,9 @@ Icon=craftcraft
 Categories=Utility;
 Terminal=false
 EOF
-        command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q "$data/applications" 2>/dev/null || true
+        if command -v update-desktop-database >/dev/null 2>&1; then
+            update-desktop-database -q "$data/applications" 2>/dev/null || true
+        fi
     fi
 
     version=$("$exe" --version | sed 's/^craftcraft //') || fail "the installed CraftCraft doesn't run"
