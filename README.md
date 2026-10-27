@@ -147,6 +147,63 @@ sh scripts/dist.sh                                   # macOS or Linux
 CRAFTCRAFT_DIST="$PWD/dist" sh install/install.sh
 ```
 
+### Signing
+
+The release workflow signs the builds once these are set in the repository's **Settings → Secrets
+and variables → Actions**. Until then, it publishes the builds unsigned.
+
+**macOS (Developer ID, then notarization).** All five are secrets:
+
+| Secret | What it is |
+|---|---|
+| `APPLE_CERTIFICATE` | A **Developer ID Application** certificate with its private key, exported from Keychain Access as a `.p12`, then base64-encoded (`base64 -i cert.p12 \| pbcopy`) |
+| `APPLE_CERTIFICATE_PASSWORD` | The password you gave the `.p12` |
+| `APPLE_API_KEY` | An App Store Connect API key (Users and Access → Integrations → Team Keys, role Developer): the `.p8` file, base64-encoded |
+| `APPLE_API_KEY_ID` | That key's ID |
+| `APPLE_API_ISSUER` | The Issuer ID shown above the keys |
+
+With only the first two, the app is signed but not notarized, and Gatekeeper still warns when it's
+downloaded in a browser. To sign locally, set `APPLE_SIGNING_IDENTITY` (and the `APPLE_API_KEY_*`
+variables, with `APPLE_API_KEY_PATH` pointing at the `.p8`) before running `scripts/dist.sh`.
+
+**Windows (Microsoft Artifact Signing, formerly Trusted Signing).** No secrets: the workflow signs
+in to Azure with GitHub's OpenID Connect, which Azure trusts only from this repository's `release`
+environment.
+
+1. In the Azure portal, create an **Artifact Signing account** (the Basic tier is enough) and note
+   its endpoint, e.g. `https://eus.codesigning.azure.net/`.
+2. In the account, complete **identity validation** (Public), then create a **certificate profile**
+   of type Public Trust from it.
+3. In Microsoft Entra ID, register an app. Under Certificates & secrets → Federated credentials,
+   add one for GitHub Actions: organization `haruny`, repository `craftcraft`, entity type
+   **Environment**, name `release`.
+4. On the signing account, give that app the **Artifact Signing Certificate Profile Signer** role
+   (Access control → Add role assignment).
+5. In GitHub, create the environment `release` (Settings → Environments). Limit it to the `main`
+   branch and `v*` tags, so only reviewed code is signed.
+6. Add these repository variables:
+
+| Variable | Value |
+|---|---|
+| `AZURE_CLIENT_ID` | The app registration's Application (client) ID |
+| `AZURE_TENANT_ID` | Its Directory (tenant) ID |
+| `AZURE_SUBSCRIPTION_ID` | The subscription the signing account is in |
+| `ARTIFACT_SIGNING_ENDPOINT` | The endpoint from step 1 |
+| `ARTIFACT_SIGNING_ACCOUNT` | The signing account's name |
+| `ARTIFACT_SIGNING_PROFILE` | The certificate profile's name |
+
+From then on, every run of the release workflow signs `craftcraft.exe` in both Windows zips,
+x86_64 and Arm, and checks each signature and timestamp before the zips are published. A run
+started by hand signs too, so you can try it before tagging.
+
+## Privacy
+
+CraftCraft collects no data about you and has no telemetry. It connects only to fetch the catalog
+and release information from `haruny.github.io` and `api.github.com`, the app icons the catalog
+lists, and the release files you choose to install from `github.com`. Those services see your IP
+address, as for any web request. Turn off automatic update checks in Settings to have it connect
+only when you ask it to.
+
 ## Layout
 
 ```

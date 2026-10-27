@@ -3,6 +3,11 @@ name: Release
 # Pushing a tag like v0.1.0 builds every platform, installs each build with the install scripts,
 # and publishes a GitHub release. Running it by hand (Actions > Release > Run workflow) does the
 # same without publishing: the builds are attached to the run as artifacts, for testing.
+#
+# Signing switches on by itself once its secrets are set (see "Signing" in the README):
+#   macOS    APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD: sign with Developer ID
+#            APPLE_API_KEY, APPLE_API_KEY_ID, APPLE_API_ISSUER: also notarize
+#   Windows  the AZURE_* and ARTIFACT_SIGNING_* variables: sign with Microsoft's Artifact Signing
 
 on:
   push:
@@ -26,6 +31,8 @@ jobs:
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
     runs-on: ${{ matrix.os }}
     name: build (${{ matrix.target }})
+    env:
+      MAC_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -38,6 +45,37 @@ jobs:
       - name: Linux windowing headers
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+
+      - name: Developer ID certificate (macOS)
+        if: runner.os == 'macOS' && env.MAC_SIGNING == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          # A throwaway keychain holding only the certificate, so codesign can use it unattended.
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 16)
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          # shellcheck disable=SC2046 # one argument per keychain already listed
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/certificate.p12"
+          identity=$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | head -n 1)
+          [ -n "$identity" ] || { echo "APPLE_CERTIFICATE has no Developer ID Application identity"; exit 1; }
+          echo "APPLE_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+          if [ -n "$APPLE_API_KEY" ]; then
+            printf '%s' "$APPLE_API_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+            { echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/notary.p8"
+              echo "APPLE_API_KEY_ID=$APPLE_API_KEY_ID"
+              echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"; } >> "$GITHUB_ENV"
+          fi
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
@@ -70,8 +108,12 @@ jobs:
         run: |
           sh install/install.sh
           if [ "$RUNNER_OS" = macOS ]; then
-            exe="$HOME/Applications/CraftCraft.app/Contents/MacOS/craftcraft"
+            app="$HOME/Applications/CraftCraft.app"
+            exe="$app/Contents/MacOS/craftcraft"
             lipo -archs "$exe" | grep -q x86_64 && lipo -archs "$exe" | grep -q arm64
+            codesign --verify --strict "$app"
+            # Notarized: Gatekeeper accepts it as a download from an identified developer.
+            if [ -n "${APPLE_API_KEY_PATH:-}" ]; then spctl --assess --type execute -vv "$app"; xcrun stapler validate "$app"; fi
           else
             exe="$HOME/.local/bin/craftcraft"
           fi
@@ -83,9 +125,68 @@ jobs:
           path: dist/craftcraft-*
           if-no-files-found: error
 
-  release:
+  # Signs craftcraft.exe in both Windows zips with Microsoft's Artifact Signing. Its action only
+  # runs on x86_64 Windows, so this one job signs the Arm exe too. It signs in the `release`
+  # environment, the only place Azure accepts this workflow's sign-in from (see the README).
+  sign-windows:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: vars.ARTIFACT_SIGNING_ACCOUNT != ''
+    runs-on: windows-2025
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: craftcraft-*-pc-windows-msvc
+          path: unsigned
+          merge-multiple: true
+      - name: Unpack
+        run: |
+          foreach ($zip in Get-ChildItem unsigned -Filter 'craftcraft-windows-*.zip') {
+            Expand-Archive $zip.FullName -DestinationPath "sign/$($zip.BaseName)"
+          }
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\sign
+          files-folder-filter: exe
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: CraftCraft
+          description-url: https://github.com/haruny/craftcraft
+      - name: Check the signatures and zip them up again
+        run: |
+          New-Item -ItemType Directory signed | Out-Null
+          foreach ($dir in Get-ChildItem sign -Directory) {
+            $sig = Get-AuthenticodeSignature "$($dir.FullName)/craftcraft.exe"
+            if ($sig.Status -ne 'Valid') { throw "$($dir.Name): signature is $($sig.Status)" }
+            if (-not $sig.TimeStamperCertificate) { throw "$($dir.Name): not timestamped" }
+            Write-Host "$($dir.Name): signed by $($sig.SignerCertificate.Subject)"
+            Compress-Archive -Path "$($dir.FullName)/craftcraft.exe" -DestinationPath "signed/$($dir.Name).zip"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-signed
+          path: signed/craftcraft-windows-*.zip
+          if-no-files-found: error
+
+  release:
+    needs: [build, sign-windows]
+    # Without Artifact Signing set up, sign-windows is skipped and the release ships unsigned Windows builds.
+    if: >-
+      !cancelled() && startsWith(github.ref, 'refs/tags/') &&
+      needs.build.result == 'success' && needs.sign-windows.result != 'failure'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -95,6 +196,12 @@ jobs:
           pattern: craftcraft-*
           path: dist
           merge-multiple: true
+      - name: Swap in the signed Windows builds
+        if: needs.sign-windows.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-signed
+          path: dist
       - name: SHA256SUMS
         working-directory: dist
         run: sha256sum craftcraft-* > SHA256SUMS && cat SHA256SUMS

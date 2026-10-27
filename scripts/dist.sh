@@ -8,6 +8,10 @@
 #   scripts/dist.sh <target>    a specific Linux target, e.g. aarch64-unknown-linux-gnu
 #
 # To try the result the way a user would: CRAFTCRAFT_DIST="$PWD/dist" sh install/install.sh
+#
+# On macOS, APPLE_SIGNING_IDENTITY ("Developer ID Application: …") signs the app with that
+# certificate instead of ad hoc, and APPLE_API_KEY_PATH, APPLE_API_KEY_ID and APPLE_API_ISSUER (an
+# App Store Connect API key) notarize it.
 
 set -eu
 cd "$(dirname "$0")/.."
@@ -44,8 +48,22 @@ Darwin)
 </dict>
 </plist>
 EOF
-    # Apple silicon only runs signed code; an ad-hoc signature is enough when nothing quarantines it.
-    codesign --force --deep --sign - "$app"
+    if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+        # Developer ID, with the hardened runtime notarization requires.
+        codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
+        codesign --verify --strict --verbose=2 "$app"
+    else
+        # Apple silicon only runs signed code; an ad-hoc signature is enough when nothing quarantines it.
+        codesign --force --sign - "$app"
+    fi
+    if [ -n "${APPLE_API_KEY_PATH:-}" ]; then
+        # Notarize, then staple the ticket so Gatekeeper accepts the app offline too.
+        ditto -c -k --keepParent "$app" target/dist/notarize.zip
+        xcrun notarytool submit target/dist/notarize.zip --wait \
+            --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER"
+        xcrun stapler staple "$app"
+        rm target/dist/notarize.zip
+    fi
     package=craftcraft-macos-universal.tar.gz
     tar -czf "dist/$package" -C target/dist CraftCraft.app
     ;;
