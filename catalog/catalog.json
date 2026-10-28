@@ -462,7 +462,7 @@
       "homepage": "https://solidcraft.io",
       "license": "MIT OR Apache-2.0",
       "color": "#1f58b5",
-      "icon": "https://raw.githubusercontent.com/tangency-labs/solidcraft/main/assets/icons/app/linux/exports/hicolor/128x128/apps/ai.storyteller.solidcraft.png",
+      "icon": "https://raw.githubusercontent.com/tangency-labs/solidcraft/main/assets/icons/app/linux/exports/hicolor/128x128/apps/io.tangencylabs.solidcraft.png",
       "added": "2026-10-26",
       "assets": {
         "windows-x86_64": "solidcraft-*-windows-x64.msi",

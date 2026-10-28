@@ -4,7 +4,7 @@
 
 Every app in CraftCraft comes from one file, [`catalog/catalog.json`](catalog/catalog.json). To add
 one, open a pull request that adds an entry to it. Once it's merged, every launcher and the
-[website](https://haruny.github.io/craftcraft-site/) pick it up within a few hours, with no new
+website pick it up within a few hours, with no new
 launcher release.
 
 **The quick way:** point your AI agent (Claude Code, Codex, Cursor…) at

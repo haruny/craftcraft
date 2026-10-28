@@ -33,7 +33,7 @@ your user only (no admin rights), and opens it. Run it again to update.
 The list of apps isn't built into the launcher. It comes from
 [`catalog/catalog.json`](catalog/catalog.json) in this repository, which is published at
 `https://haruny.github.io/craftcraft/catalog.json` whenever it changes on `main`. Both the
-launcher and the [website](https://haruny.github.io/craftcraft-site/) read it. The launcher fetches
+launcher and the website read it. The launcher fetches
 it:
 
 - at start-up, sending the last ETag so an unchanged catalog costs one tiny request;
