@@ -62,16 +62,18 @@
     </Feature>
 
     <!-- A launcher running in the tray holds its file open and ignores the Restart Manager's
-         requests to close, so it's stopped first, as install.ps1 does. -->
-    <SetProperty Id="WixQuietExecCmdLine" Action="SetStopLauncher" Sequence="execute" Before="StopLauncher"
+         requests to close, so it's stopped first, as install.ps1 does. WixQuietExec64, not
+         WixQuietExec: from the 32-bit one, System64Folder is redirected to the 32-bit PowerShell,
+         which can't read a 64-bit process's Path, so nothing would match. -->
+    <SetProperty Id="WixQuietExec64CmdLine" Action="SetStopLauncher" Sequence="execute" Before="StopLauncher"
                  Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -Command &quot;Get-Process craftcraft -ErrorAction SilentlyContinue | Where-Object Path -eq '[INSTALLFOLDER]craftcraft.exe' | Stop-Process -Force&quot;" />
-    <CustomAction Id="StopLauncher" BinaryKey="WixCA" DllEntry="WixQuietExec" Execute="immediate" Return="ignore" />
+    <CustomAction Id="StopLauncher" BinaryKey="WixCA" DllEntry="WixQuietExec64" Execute="immediate" Return="ignore" />
 
     <!-- Uninstalling (not upgrading) also stops it starting at sign-in. install.ps1 passes
          KEEPSETTINGS=1 when it takes over, since it puts the launcher back where it was. -->
-    <SetProperty Id="WixQuietExecCmdLine" Action="SetForgetLogon" Sequence="execute" After="StopLauncher"
+    <SetProperty Id="WixQuietExec64CmdLine" Action="SetForgetLogon" Sequence="execute" After="StopLauncher"
                  Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -Command &quot;Remove-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name CraftCraft -ErrorAction SilentlyContinue&quot;" />
-    <CustomAction Id="ForgetLogon" BinaryKey="WixCA" DllEntry="WixQuietExec" Execute="immediate" Return="ignore" />
+    <CustomAction Id="ForgetLogon" BinaryKey="WixCA" DllEntry="WixQuietExec64" Execute="immediate" Return="ignore" />
 
     <!-- Opened by double-clicking (full UI), it starts CraftCraft once installed, as the script does. -->
     <CustomAction Id="Launch" FileKey="craftcraft.exe" ExeCommand="" Return="asyncNoWait" Impersonate="yes" />
