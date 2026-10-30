@@ -203,6 +203,111 @@ fn broadcast_environment_change() {
     }
 }
 
+#[cfg(windows)]
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// Whether Windows starts the launcher when the user signs in.
+#[cfg(windows)]
+pub fn starts_on_logon() -> bool {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+    RegKey::predef(HKEY_CURRENT_USER).open_subkey(RUN_KEY).and_then(|k| k.get_value::<String, _>("CraftCraft")).is_ok()
+}
+
+/// Has Windows start this copy of the launcher, in the tray, when the user signs in (or not).
+#[cfg(windows)]
+pub fn set_start_on_logon(on: bool) -> Result<(), String> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+    let (run, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(RUN_KEY).map_err(|e| e.to_string())?;
+    if on {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        run.set_value("CraftCraft", &format!("\"{}\" --background", exe.display())).map_err(|e| e.to_string())
+    } else {
+        match run.delete_value("CraftCraft") {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// The LaunchAgent that starts the launcher at login (macOS).
+#[cfg(target_os = "macos")]
+fn launch_agent() -> Option<PathBuf> {
+    Some(directories::BaseDirs::new()?.home_dir().join("Library/LaunchAgents/io.craftcraft.CraftCraft.plist"))
+}
+
+/// Whether macOS starts the launcher when the user logs in.
+#[cfg(target_os = "macos")]
+pub fn starts_on_logon() -> bool {
+    launch_agent().is_some_and(|p| p.is_file())
+}
+
+/// Has macOS start this copy of the launcher, in the menu bar, when the user logs in (or not).
+#[cfg(target_os = "macos")]
+pub fn set_start_on_logon(on: bool) -> Result<(), String> {
+    let agent = launch_agent().ok_or("couldn't find your home folder")?;
+    if !on {
+        return match std::fs::remove_file(&agent) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+            _ => Ok(()),
+        };
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = exe.to_string_lossy().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.craftcraft.CraftCraft</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+        <string>--background</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
+"#
+    );
+    if let Some(dir) = agent.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    crate::paths::write_atomic(&agent, plist.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// Adds the launcher to the Start menu if it isn't there, as the install script does, for a copy
+/// installed some other way (unpacked from the zip, say). Debug builds leave it alone.
+#[cfg(windows)]
+pub fn add_to_start_menu() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let (Some(dirs), Ok(exe)) = (directories::BaseDirs::new(), std::env::current_exe()) else { return };
+    let link = dirs.data_dir().join(r"Microsoft\Windows\Start Menu\Programs\CraftCraft.lnk");
+    if cfg!(debug_assertions) || link.exists() {
+        return;
+    }
+    let quote = |p: &Path| p.to_string_lossy().replace('\'', "''");
+    let dir = exe.parent().unwrap_or(&exe);
+    let script = format!(
+        "$l = (New-Object -ComObject WScript.Shell).CreateShortcut('{}'); $l.TargetPath = '{exe}'; $l.WorkingDirectory = '{}'; \
+         $l.IconLocation = '{exe},0'; $l.Description = 'Install, update and open software rewritten in Rust'; $l.Save()",
+        quote(&link),
+        quote(dir),
+        exe = quote(&exe),
+    );
+    let spawned = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &script]).creation_flags(CREATE_NO_WINDOW).spawn();
+    if let Err(e) = spawned {
+        eprintln!("adding to the Start menu: {e}");
+    }
+}
+
 /// The line to add to a shell profile (macOS and Linux).
 #[cfg(not(windows))]
 pub fn path_line(paths: &Paths) -> String {

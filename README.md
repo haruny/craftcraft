@@ -24,9 +24,33 @@ your user only (no admin rights), and opens it. Run it again to update.
 
 | | Installed to | Also |
 |---|---|---|
-| Windows | `%LOCALAPPDATA%\Programs\CraftCraft` | Start menu shortcut; listed in Settings → Apps, which uninstalls it |
+| Windows | `%LOCALAPPDATA%\Programs\CraftCraft` | Start menu shortcut; listed in Settings → Apps, which uninstalls it; a tray icon while it runs |
 | macOS | `~/Applications/CraftCraft.app` | One build for Apple silicon and Intel |
 | Linux | `~/.local/bin/craftcraft` | Applications menu entry and icon |
+
+Or download an installer from [Releases](https://github.com/haruny/craftcraft/releases/latest):
+
+- **Windows**: `craftcraft-windows-x86_64.msi` (or `-aarch64.msi` for Arm). It installs the same
+  way as the script, for your user only, and opens CraftCraft. Run a newer one to update. The
+  script and the installer can take each other's place: whichever ran last owns the install, and
+  Settings → Apps lists it once.
+- **macOS**: `craftcraft-macos-universal.dmg`. Open it and drag CraftCraft to Applications.
+
+On Windows and macOS, **Settings** also has:
+
+- **Start on logon**: CraftCraft starts in the tray (the menu bar on macOS) when you sign in, as
+  `craftcraft --background`. Windows runs it from the `CraftCraft` value under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; macOS from
+  `~/Library/LaunchAgents/io.craftcraft.CraftCraft.plist`.
+- **Minimize to tray on close** (on by default): closing the window leaves CraftCraft in the tray,
+  still checking for updates; the icon's tooltip counts them. On Windows, click the icon to open
+  the window, or right-click it to check now or quit. On macOS, click it for the same menu; while
+  the window is closed there's no Dock icon, and opening CraftCraft from Finder brings the window
+  back. ⌘Q still quits.
+
+Only one copy runs: opening CraftCraft again brings back the window of the one in the tray. On
+Windows, a copy that wasn't installed by the script (unpacked from the zip, say) adds itself to the
+Start menu.
 
 ## The catalog drives everything
 
@@ -37,7 +61,7 @@ launcher and the website read it. The launcher fetches
 it:
 
 - at start-up, sending the last ETag so an unchanged catalog costs one tiny request;
-- every `refresh_hours` (set in the catalog, 1–168) while it runs, retrying 15 minutes after a failure;
+- every few hours while it runs (8 by default; **Settings** sets 1–168), retrying 15 minutes after a failure;
 - when you press **Check for updates**.
 
 It keeps the last good copy, so it opens instantly and works offline. When the catalog changes:
@@ -131,8 +155,9 @@ anything it would skip.
 
 Pushing a tag like `v0.2.0` (matching `version` in `Cargo.toml`) runs
 [release.yml](.github/workflows/release.yml). It builds Windows (x86_64, Arm), macOS (one universal
-`.app`) and Linux (x86_64, Arm) on their own runners, installs each build with the install script
-to test it, and publishes a GitHub release with the packages and a `SHA256SUMS` file. Running the
+`.app`, also as a `.dmg`) and Linux (x86_64, Arm) on their own runners, installs each build with
+the install script to test it, packages the signed Windows builds as `.msi` installers and tests
+those too, and publishes a GitHub release with the packages and a `SHA256SUMS` file. Running the
 workflow by hand does everything except publish: the builds are attached to the run, for testing.
 After a release, bump `launcher.version` in the catalog so older launchers offer the update.
 
@@ -141,6 +166,8 @@ To build and try a package locally, the way users get it:
 ```powershell
 ./scripts/dist.ps1                                   # Windows: dist/craftcraft-windows-<arch>.zip
 $env:CRAFTCRAFT_DIST = "$PWD\dist"; ./install/install.ps1
+# The .msi, with WiX 3 (https://github.com/wixtoolset/wix3) installed:
+./scripts/msi.ps1 -Exe target/x86_64-pc-windows-msvc/release/craftcraft.exe -Arch x86_64
 ```
 ```sh
 sh scripts/dist.sh                                   # macOS or Linux
@@ -210,7 +237,9 @@ only when you ask it to.
 catalog/         catalog.json and featured.json; check.mjs (CI runs it on every change); publish.mjs
                  and releases.mjs, which build what's published (catalog.json, releases.json)
 install/         install.ps1 and install.sh, the one-line installers
-scripts/         dist.ps1 and dist.sh, which build and package a release
+installer/       craftcraft.wxs, the Windows .msi (WiX 3)
+scripts/         dist.ps1 and dist.sh, which build and package a release (dist.sh: the .dmg too);
+                 msi.ps1, which packages the .msi
 src/index.rs     the release index: every app's latest release and stars, in one file
 src/catalog.rs   the catalog format: parsing, validation, platforms, picking a release file
 src/feed.rs      fetching and caching the catalog
@@ -220,6 +249,7 @@ src/install.rs   download, verify, unpack, swap in, shims, uninstall
 src/system.rs    opening apps, terminals, folders and links; PATH
 src/icons.rs     app icons, cached and decoded off the UI thread
 src/worker.rs    background jobs and the events they send the UI
+src/tray.rs      the tray (menu bar) icon on Windows and macOS; on Windows, keeping to one running copy
 src/ui.rs        the window
 src/theme.rs     colours, fonts and widget styling
 ```

@@ -1,6 +1,6 @@
 //! The window: a sidebar of sections, and a grid of app cards.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use eframe::egui::text::LayoutJob;
@@ -13,7 +13,7 @@ use crate::github::{Lookup, Release};
 use crate::index::{self, Index};
 use crate::install::{self, Stage};
 use crate::paths::Paths;
-use crate::state::{Installed, Sort, State};
+use crate::state::{Installed, MAX_CHECK_HOURS, Sort, State};
 use crate::theme::{self, Palette};
 use crate::worker::{Event, Worker};
 use crate::{now, system, version};
@@ -78,6 +78,9 @@ pub struct Launcher {
     index: Index,
     busy: HashMap<String, Busy>,
     app_errors: HashMap<String, String>,
+    /// Apps waiting their turn after Update all. They go one at a time: Windows can't run two
+    /// installers at once.
+    update_queue: VecDeque<String>,
     icons: HashMap<String, Icon>,
     checking_catalog: bool,
     checking_releases: bool,
@@ -88,6 +91,23 @@ pub struct Launcher {
     /// How tall the sidebar's bottom section was last frame, so the sections above can stop short of it.
     sidebar_bottom: f32,
     message: Option<(String, Instant)>,
+    #[cfg(tray)]
+    tray: Option<crate::tray::Tray>,
+    /// Started at logon: hide the window as soon as it's up.
+    #[cfg(tray)]
+    hide_at_start: bool,
+    /// Quit was chosen in the tray, so closing the window really closes it.
+    #[cfg(tray)]
+    quitting: bool,
+    /// Whether the system starts the launcher at logon, as last read from it.
+    #[cfg(tray)]
+    start_on_logon: bool,
+    /// The window is hidden in the menu bar.
+    #[cfg(target_os = "macos")]
+    hidden: bool,
+    /// Whether the app was active last time we looked, while hidden.
+    #[cfg(target_os = "macos")]
+    was_active: bool,
 }
 
 impl Launcher {
@@ -118,6 +138,7 @@ impl Launcher {
             index: release_index,
             busy: HashMap::new(),
             app_errors: HashMap::new(),
+            update_queue: VecDeque::new(),
             icons: HashMap::new(),
             checking_catalog: false,
             checking_releases: false,
@@ -127,7 +148,21 @@ impl Launcher {
             show_settings: false,
             sidebar_bottom: 120.0,
             message: None,
+            #[cfg(tray)]
+            tray: None,
+            #[cfg(tray)]
+            hide_at_start: false,
+            #[cfg(tray)]
+            quitting: false,
+            #[cfg(tray)]
+            start_on_logon: system::starts_on_logon(),
+            #[cfg(target_os = "macos")]
+            hidden: false,
+            #[cfg(target_os = "macos")]
+            was_active: false,
         };
+        #[cfg(windows)]
+        system::add_to_start_menu();
         launcher.apply_index();
         launcher.fetch_icons();
         launcher.detect();
@@ -136,6 +171,84 @@ impl Launcher {
             launcher.check_now();
         }
         launcher
+    }
+
+    /// Adds the tray icon; `background` starts the launcher hidden in it. Without the icon there'd
+    /// be no way back to a hidden window, so then the window stays up and closes as usual.
+    #[cfg(tray)]
+    pub fn with_tray(mut self, ctx: &egui::Context, background: bool, #[cfg(windows)] instance: crate::tray::Instance) -> Self {
+        match crate::tray::Tray::new(ctx) {
+            Ok(tray) => {
+                #[cfg(windows)]
+                tray.listen(instance, ctx);
+                self.tray = Some(tray);
+                self.hide_at_start = background;
+            }
+            Err(e) => eprintln!("tray icon: {e}"),
+        }
+        self
+    }
+
+    /// Shows the window, or hides it in the tray.
+    #[cfg(tray)]
+    fn show_window(&mut self, ctx: &egui::Context, show: bool) {
+        use egui::ViewportCommand;
+        #[cfg(target_os = "macos")]
+        {
+            crate::tray::show_in_dock(show);
+            self.hidden = !show;
+            self.was_active = crate::tray::is_active();
+        }
+        ctx.send_viewport_cmd(ViewportCommand::Visible(show));
+        if show {
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+        }
+    }
+
+    /// Answers the tray icon, and closes the window to it when that's the setting.
+    #[cfg(tray)]
+    fn tray(&mut self, ctx: &egui::Context) {
+        use egui::ViewportCommand;
+        let Some(tray) = &self.tray else { return };
+        let actions: Vec<_> = tray.actions().collect();
+        for action in actions {
+            match action {
+                crate::tray::Action::Show => self.show_window(ctx, true),
+                crate::tray::Action::Check => self.check_now(),
+                crate::tray::Action::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                }
+            }
+        }
+        if std::mem::take(&mut self.hide_at_start) {
+            self.show_window(ctx, false);
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && self.state.settings.close_to_tray && !self.quitting {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            self.show_window(ctx, false);
+        }
+        // Opening the app again from Finder or Launchpad only makes it active: then show the window.
+        #[cfg(target_os = "macos")]
+        if self.hidden {
+            let active = crate::tray::is_active();
+            if active && !self.was_active {
+                self.show_window(ctx, true);
+            } else {
+                self.was_active = active;
+                ctx.request_repaint_after(Duration::from_secs(1));
+            }
+        }
+        let updates = self.update_count();
+        let tooltip = match updates {
+            0 => "CraftCraft".to_string(),
+            1 => "CraftCraft: 1 update".to_string(),
+            n => format!("CraftCraft: {n} updates"),
+        };
+        if let Some(tray) = &mut self.tray {
+            tray.set_tooltip(tooltip);
+        }
     }
 
     fn check_now(&mut self) {
@@ -205,12 +318,12 @@ impl Launcher {
         }
     }
 
-    /// Checks again when `refresh_hours` have passed, or a while after a failure.
+    /// Checks again when the chosen number of hours have passed, or a while after a failure.
     fn schedule(&mut self) {
         if !self.state.settings.auto_check || self.checking_catalog {
             return;
         }
-        let hours = self.catalog.as_ref().map_or(6, |c| c.refresh_hours);
+        let hours = self.state.settings.check_hours.clamp(1, MAX_CHECK_HOURS);
         let due = now() - self.state.last_check >= i64::from(hours) * 3600;
         let waited = self.last_attempt.is_none_or(|t| t.elapsed() >= RETRY_AFTER);
         if due && waited {
@@ -289,6 +402,7 @@ impl Launcher {
                     }
                 }
                 self.detect();
+                self.next_update();
             }
             Event::Uninstalled { id, result } => {
                 self.busy.remove(&id);
@@ -356,6 +470,42 @@ impl Launcher {
         self.catalog.as_ref().map_or(0, |c| c.apps.iter().filter(|a| matches!(self.status(a), Status::Update { .. })).count())
     }
 
+    /// The apps Update all would update: those with an Update button, not already under way.
+    fn updatable(&self) -> Vec<String> {
+        let (Some(catalog), Some(platform)) = (&self.catalog, self.platform) else { return Vec::new() };
+        catalog
+            .apps
+            .iter()
+            .filter(|a| !self.busy.contains_key(&a.id) && !self.update_queue.contains(&a.id))
+            .filter(|a| matches!(self.status(a), Status::Update { external, .. } if !separate_copy(a, platform, external)))
+            .map(|a| a.id.clone())
+            .collect()
+    }
+
+    fn update_all(&mut self) {
+        let ready = self.updatable();
+        self.update_queue.extend(ready);
+        self.next_update();
+    }
+
+    /// Starts the next queued update, once nothing else is installing.
+    fn next_update(&mut self) {
+        if self.busy.values().any(|b| matches!(b, Busy::Working(_))) {
+            return;
+        }
+        let Some(platform) = self.platform else { return };
+        while let Some(id) = self.update_queue.pop_front() {
+            let Some(app) = self.catalog.as_ref().and_then(|c| c.apps.iter().find(|a| a.id == id)).cloned() else { continue };
+            // Skip one that's been updated or removed since it was queued.
+            let to = match self.status(&app) {
+                Status::Update { to, .. } => to.clone(),
+                _ => continue,
+            };
+            self.start_install(&app, to, platform);
+            return;
+        }
+    }
+
     /// The latest release's date, `YYYY-MM-DD`.
     fn released(&self, app: &App) -> Option<&str> {
         match self.releases.get(&app.id) {
@@ -411,6 +561,8 @@ impl eframe::App for Launcher {
         for event in events {
             self.handle(ctx, event);
         }
+        #[cfg(tray)]
+        self.tray(ctx);
         self.schedule();
         // Wake up now and then to run the schedule even when nothing else happens.
         ctx.request_repaint_after(Duration::from_secs(60));
@@ -529,7 +681,22 @@ impl Launcher {
                 (name, String::new())
             }
         };
-        ui.label(RichText::new(title).family(theme::strong()).size(26.0).color(p.ink));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(title).family(theme::strong()).size(26.0).color(p.ink));
+            if self.filter == Filter::Updates {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let waiting = self.update_queue.len();
+                    if waiting > 0 {
+                        spinner_label(ui, p, &format!("Updating… {waiting} more to go"));
+                    } else {
+                        let ready = self.updatable().len();
+                        if ready > 0 && primary(ui, p, "Update all").clicked() {
+                            self.update_all();
+                        }
+                    }
+                });
+            }
+        });
         if !subtitle.is_empty() {
             ui.label(RichText::new(subtitle).color(p.muted));
         }
@@ -802,9 +969,7 @@ impl Launcher {
                     }
                 }
                 Status::Update { to, external, .. } => {
-                    // An installer upgrades a system install in place; an archive can't replace a
-                    // copy someone else installed, so the launcher installs its own beside it.
-                    let separate = external && app.asset_for(platform).is_some_and(|(_, m)| m != Method::Installer);
+                    let separate = separate_copy(app, platform, external);
                     let button = primary(ui, p, if separate { "Install latest" } else { "Update" });
                     let button = if separate {
                         button.on_hover_text("This copy was installed outside CraftCraft (winget, cargo…). CraftCraft will install its own, up-to-date copy.")
@@ -908,7 +1073,9 @@ impl Launcher {
     fn start_install(&mut self, app: &App, release: Release, platform: Platform) {
         self.app_errors.remove(&app.id);
         self.busy.insert(app.id.clone(), Busy::Working(Stage::Downloading { done: 0, total: None }));
-        self.worker.install(app.clone(), release, platform);
+        // Update a copy found installed for everyone in place, rather than beside it.
+        let for_everyone = self.detected.get(&app.id).is_some_and(|d| d.for_everyone);
+        self.worker.install(app.clone(), release, platform, for_everyone);
     }
 
     fn open(&mut self, app: &App, installed: Option<&Installed>, platform: Platform) {
@@ -952,11 +1119,32 @@ impl Launcher {
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .frame(Frame::window(&ctx.global_style()).inner_margin(Margin::same(20)))
             .show(ctx, |ui| {
-                ui.checkbox(&mut self.state.settings.auto_check, "Check for new apps and updates automatically");
-                if let Some(c) = &self.catalog {
-                    ui.label(RichText::new(format!("At start-up and every {} hours, as the catalog asks.", c.refresh_hours)).small().color(p.subtle));
-                }
+                let settings = &mut self.state.settings;
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut settings.auto_check, "Check for new apps and updates every");
+                    ui.add_enabled(settings.auto_check, egui::DragValue::new(&mut settings.check_hours).range(1..=MAX_CHECK_HOURS).speed(0.2));
+                    ui.label(if settings.check_hours == 1 { "hour" } else { "hours" });
+                });
+                ui.label(RichText::new("And at start-up. Check for updates in the sidebar checks right away.").small().color(p.subtle));
                 ui.add_space(14.0);
+
+                #[cfg(tray)]
+                {
+                    // What the system calls the tray, and signing in.
+                    let (tray, sign_in) = if cfg!(target_os = "macos") { ("menu bar", "log in") } else { ("tray", "sign in to Windows") };
+                    ui.label(RichText::new("In the background").family(theme::strong()));
+                    let mut on = self.start_on_logon;
+                    if ui.checkbox(&mut on, "Start on logon").changed() {
+                        match system::set_start_on_logon(on) {
+                            Ok(()) => self.start_on_logon = on,
+                            Err(e) => self.flash(format!("Couldn't change that: {e}")),
+                        }
+                    }
+                    ui.label(RichText::new(format!("Opens in the {tray} when you {sign_in}, and checks for updates from there.")).small().color(p.subtle));
+                    ui.add_enabled(self.tray.is_some(), egui::Checkbox::new(&mut self.state.settings.close_to_tray, format!("Minimize to {tray} on close")));
+                    ui.label(RichText::new(format!("Closing the window keeps CraftCraft in the {tray}. Quit from its icon's menu.")).small().color(p.subtle));
+                    ui.add_space(14.0);
+                }
 
                 ui.label(RichText::new("Command-line apps").family(theme::strong()));
                 ui.label(RichText::new("Terminal and command-line apps get a launcher in this folder:").small().color(p.muted));
@@ -1031,6 +1219,13 @@ fn nav_item(ui: &mut egui::Ui, p: Palette, label: &str, count: usize, selected: 
         }
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// Whether updating means installing a separate copy. An installer upgrades a system install in
+/// place; an archive can't replace a copy someone else installed, so the launcher installs its own
+/// beside it.
+fn separate_copy(app: &App, platform: Platform, external: bool) -> bool {
+    external && app.asset_for(platform).is_some_and(|(_, m)| m != Method::Installer)
 }
 
 fn primary(ui: &mut egui::Ui, p: Palette, text: &str) -> egui::Response {

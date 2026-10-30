@@ -1,6 +1,6 @@
 //! Fetching the hosted catalog.
 //!
-//! The launcher asks for the catalog at start-up and then every `refresh_hours`. It sends the
+//! The launcher asks for the catalog at start-up and then every few hours (a setting). It sends the
 //! last ETag, so an unchanged catalog costs one tiny request, and it keeps the last good copy so
 //! it starts instantly and still works offline.
 

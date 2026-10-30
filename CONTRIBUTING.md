@@ -94,7 +94,8 @@ protection rules.
 
 Other fields in `catalog.json`:
 
-- `refresh_hours` (1–168): how often launchers re-check the catalog.
+- `refresh_hours` (1–168): how often launchers before 0.2 re-check the catalog. Newer ones use the
+  user's setting (8 hours by default) instead.
 - `launcher.version`: the newest launcher release. Launchers older than this show an update banner,
   so bump it after publishing a launcher release.
 - `notices`: announcements shown in the launcher until the user dismisses them:

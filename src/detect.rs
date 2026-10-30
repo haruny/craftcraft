@@ -22,6 +22,8 @@ pub struct Detected {
     pub exe: Option<PathBuf>,
     /// How to remove it, on Windows: the installer's uninstall command.
     pub uninstall: Option<String>,
+    /// On Windows: installed for every user, so an update has to be too.
+    pub for_everyone: bool,
 }
 
 pub fn detect_all(apps: &[App], platform: Platform, paths: &Paths) -> HashMap<String, Detected> {
@@ -57,7 +59,7 @@ fn exe_name(bin: &str, os: Os) -> String {
 fn detect_command(app: &App, os: Os, path_dirs: &[PathBuf]) -> Option<Detected> {
     let exe = bin_names(app).iter().find_map(|bin| find_on_path(&exe_name(bin, os), path_dirs))?;
     let version = run_version(&exe);
-    Some(Detected { version, exe: Some(exe), uninstall: None })
+    Some(Detected { version, exe: Some(exe), uninstall: None, for_everyone: false })
 }
 
 fn find_on_path(file: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
@@ -80,6 +82,8 @@ struct Registered {
     location: Option<PathBuf>,
     icon: Option<PathBuf>,
     uninstall: Option<String>,
+    /// Listed in HKEY_LOCAL_MACHINE: installed for every user.
+    for_everyone: bool,
 }
 
 /// Whether an installed program's display name is this app: `PhotoCraft`, `PhotoCraft 0.16.0`
@@ -110,10 +114,10 @@ fn detect_windows(app: &App, registered: &[Registered]) -> Option<Detected> {
         }
     });
     let Some(entry) = matches.first() else {
-        return launch.map(|exe| Detected { version: None, exe: Some(exe), uninstall: None });
+        return launch.map(|exe| Detected { version: None, exe: Some(exe), uninstall: None, for_everyone: false });
     };
     let exe = launch.or_else(|| find_windows_exe(app, matches.as_slice()));
-    Some(Detected { version: entry.version.clone(), exe, uninstall: matches.iter().find_map(|r| r.uninstall.clone()) })
+    Some(Detected { version: entry.version.clone(), exe, uninstall: matches.iter().find_map(|r| r.uninstall.clone()), for_everyone: entry.for_everyone })
 }
 
 /// Where an installed program's executable is: from its icon, its install folder, or the usual
@@ -179,6 +183,7 @@ fn registered_programs() -> Vec<Registered> {
                 location: get("InstallLocation").map(PathBuf::from),
                 icon: get("DisplayIcon").map(|i| PathBuf::from(i.split(',').next().unwrap_or_default().trim_matches('"'))),
                 uninstall: get("UninstallString"),
+                for_everyone: root == HKEY_LOCAL_MACHINE,
             });
         }
     }
@@ -198,7 +203,7 @@ fn detect_macos(app: &App) -> Option<Detected> {
     bundles.extend(app.launch_path(Os::Macos).map(paths::expand));
     let bundle = bundles.into_iter().find(|b| b.is_dir())?;
     let version = std::fs::read_to_string(bundle.join("Contents/Info.plist")).ok().and_then(|plist| plist_string(&plist, "CFBundleShortVersionString"));
-    Some(Detected { version, exe: Some(bundle), uninstall: None })
+    Some(Detected { version, exe: Some(bundle), uninstall: None, for_everyone: false })
 }
 
 /// A string value from an XML property list.
@@ -212,7 +217,7 @@ fn plist_string(plist: &str, key: &str) -> Option<String> {
 fn detect_linux(app: &App, path_dirs: &[PathBuf]) -> Option<Detected> {
     let launch = app.launch_path(Os::Linux).map(paths::expand).filter(|p| p.is_file());
     if let Some(exe) = launch.or_else(|| bin_names(app).iter().find_map(|b| find_on_path(b, path_dirs))) {
-        return Some(Detected { version: package_version(&app.id), exe: Some(exe), uninstall: None });
+        return Some(Detected { version: package_version(&app.id), exe: Some(exe), uninstall: None, for_everyone: false });
     }
     // An AppImage the user keeps in ~/Applications, named like `photocraft-0.16.0-linux-x86_64.AppImage`.
     let dir = directories::BaseDirs::new()?.home_dir().join("Applications");
@@ -222,7 +227,7 @@ fn detect_linux(app: &App, path_dirs: &[PathBuf]) -> Option<Detected> {
         name.starts_with(&prefix) && name.ends_with(".appimage")
     })?;
     let name = image.file_name()?.to_string_lossy().into_owned();
-    Some(Detected { version: parse_version(&name[prefix.len()..]), exe: Some(image), uninstall: None })
+    Some(Detected { version: parse_version(&name[prefix.len()..]), exe: Some(image), uninstall: None, for_everyone: false })
 }
 
 /// The version of an installed .deb or .rpm package.
@@ -326,11 +331,12 @@ mod tests {
         };
         let registered = [
             reg("DesignCraft (Craft Apps)", "0.12.0", None),
-            reg("DesignCraft", "0.13.0", Some("MsiExec.exe /X{60C26D84}")),
+            Registered { for_everyone: true, ..reg("DesignCraft", "0.13.0", Some("MsiExec.exe /X{60C26D84}")) },
             reg("ArtCraft Launcher", "9.9.9", None),
         ];
         let found = detect_windows(&app, &registered).unwrap();
         assert_eq!(found.version.as_deref(), Some("0.13.0"));
         assert_eq!(found.uninstall.as_deref(), Some("MsiExec.exe /X{60C26D84}"));
+        assert!(found.for_everyone);
     }
 }

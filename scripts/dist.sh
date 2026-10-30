@@ -2,6 +2,7 @@
 # Builds CraftCraft for macOS or Linux and packages it as the release does, plus dist/SHA256SUMS:
 #
 #   macOS  dist/craftcraft-macos-universal.tar.gz   CraftCraft.app, for Apple silicon and Intel
+#          dist/craftcraft-macos-universal.dmg      the same, as a disk image
 #   Linux  dist/craftcraft-linux-<arch>.tar.gz      the craftcraft binary and its icon
 #
 #   scripts/dist.sh             this computer's platform
@@ -11,7 +12,7 @@
 #
 # On macOS, APPLE_SIGNING_IDENTITY ("Developer ID Application: …") signs the app with that
 # certificate instead of ad hoc, and APPLE_API_KEY_PATH, APPLE_API_KEY_ID and APPLE_API_ISSUER (an
-# App Store Connect API key) notarize it.
+# App Store Connect API key) notarize it. Both apply to the disk image too.
 
 set -eu
 cd "$(dirname "$0")/.."
@@ -66,6 +67,28 @@ EOF
     fi
     package=craftcraft-macos-universal.tar.gz
     tar -czf "dist/$package" -C target/dist CraftCraft.app
+
+    # The disk image, for downloading in a browser: the app beside a link to Applications.
+    dmg=dist/craftcraft-macos-universal.dmg
+    mkdir target/dist/dmg
+    cp -R "$app" target/dist/dmg/
+    ln -s /Applications target/dist/dmg/Applications
+    rm -f "$dmg"
+    # hdiutil now and then fails with "Resource busy" on a busy machine; a moment later it doesn't.
+    for attempt in 1 2 3; do
+        hdiutil create -volname CraftCraft -srcfolder target/dist/dmg -fs HFS+ -format UDZO "$dmg" && break
+        [ "$attempt" = 3 ] && exit 1
+        sleep 5
+    done
+    rm -rf target/dist/dmg
+    if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+        codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
+    fi
+    if [ -n "${APPLE_API_KEY_PATH:-}" ]; then
+        xcrun notarytool submit "$dmg" --wait \
+            --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER"
+        xcrun stapler staple "$dmg"
+    fi
     ;;
 Linux)
     target=${1:-$(rustc -vV | sed -n 's/^host: //p')}

@@ -29,12 +29,18 @@ pub struct State {
 pub struct Settings {
     /// Check the catalog and releases automatically.
     pub auto_check: bool,
+    /// How often, when checking automatically: 1 to [`MAX_CHECK_HOURS`].
+    pub check_hours: u32,
+    /// Windows: closing the window leaves the launcher running in the tray.
+    pub close_to_tray: bool,
     pub sort: Sort,
 }
 
+pub const MAX_CHECK_HOURS: u32 = 168;
+
 impl Default for Settings {
     fn default() -> Self {
-        Self { auto_check: true, sort: Sort::Featured }
+        Self { auto_check: true, check_hours: 8, close_to_tray: true, sort: Sort::Featured }
     }
 }
 

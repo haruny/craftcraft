@@ -59,10 +59,18 @@
 
         Expand-Archive (Join-Path $tmp $package) (Join-Path $tmp 'unpacked')
 
-        # A running copy holds its file open; ask it to close, as clicking X would.
+        # Installed with the .msi before: remove that copy first, so Settings > Apps lists CraftCraft
+        # once. KEEPSETTINGS keeps it starting at sign-in, since this copy goes in the same place.
+        $installer = New-Object -ComObject WindowsInstaller.Installer
+        foreach ($code in $installer.RelatedProducts('{8241B415-3A84-4BFB-94C1-7F03F92257D9}')) {
+            $p = Start-Process msiexec.exe -ArgumentList "/x $code /qn KEEPSETTINGS=1" -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "Couldn't remove the copy of CraftCraft installed by its installer (msiexec stopped with code $($p.ExitCode))." }
+        }
+
+        # A running copy holds its file open; ask it to close, as clicking X would. One that's
+        # hidden in the tray (or keeps running there when closed) is stopped instead.
         Get-Process craftcraft -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | ForEach-Object {
-            $_.CloseMainWindow() | Out-Null
-            if (-not $_.WaitForExit(5000)) { $_.Kill(); $_.WaitForExit() }
+            if (-not ($_.CloseMainWindow() -and $_.WaitForExit(5000))) { $_.Kill(); $_.WaitForExit() }
         }
         New-Item -ItemType Directory -Force $dir | Out-Null
         Copy-Item (Join-Path $tmp 'unpacked\craftcraft.exe') $exe -Force
@@ -78,6 +86,7 @@
     $link = $shell.CreateShortcut($shortcut)
     $link.TargetPath = $exe
     $link.WorkingDirectory = $dir
+    $link.IconLocation = "$exe,0"
     $link.Description = 'Install, update and open software rewritten in Rust'
     $link.Save()
 
@@ -90,6 +99,7 @@ Get-Process craftcraft | Where-Object { $_.Path -eq $exe } | Stop-Process -Force
 Start-Sleep -Milliseconds 500
 Remove-Item (Join-Path ([Environment]::GetFolderPath('Programs')) 'CraftCraft.lnk') -Force
 Remove-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CraftCraft' -Recurse -Force
+Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'CraftCraft' -Force
 Set-Location $env:TEMP
 Remove-Item $PSScriptRoot -Recurse -Force
 '@

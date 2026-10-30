@@ -101,12 +101,12 @@ impl Worker {
         });
     }
 
-    pub fn install(&self, app: App, release: Release, platform: Platform) {
+    pub fn install(&self, app: App, release: Release, platform: Platform, for_everyone: bool) {
         let ctx = self.ctx.clone();
         self.spawn("install", move |tx, http, paths, _| {
             let id = app.id.clone();
             let mut last = Instant::now() - Duration::from_secs(1);
-            let result = install::install(paths, http, &app, &release, platform, |stage| {
+            let result = install::install(paths, http, &app, &release, platform, for_everyone, |stage| {
                 // Downloads report every chunk; the UI only needs a few updates a second.
                 if matches!(stage, Stage::Downloading { .. }) && last.elapsed() < Duration::from_millis(100) {
                     return;

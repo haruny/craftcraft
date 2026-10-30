@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CraftCraft's Windows installer, built by scripts/msi.ps1 with WiX 3.
+
+  Like install.ps1, it installs for the current user (no admin rights) into
+  %LOCALAPPDATA%\Programs\CraftCraft, with a Start menu shortcut, and Settings > Apps uninstalls
+  it. The two can take turns: this removes the script's uninstall entry, and the script removes
+  this installer's copy before putting its own in place, so CraftCraft is only ever listed once.
+
+  The upgrade code never changes: it's how a newer installer finds the copy it replaces, and how
+  install.ps1 finds one to remove.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="CraftCraft" Language="1033" Version="$(var.Version)" Manufacturer="CraftCraft"
+           UpgradeCode="8241B415-3A84-4BFB-94C1-7F03F92257D9">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser"
+             Description="Install, update and open software rewritten in Rust" />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of CraftCraft is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="craftcraft.ico" SourceFile="$(var.Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="craftcraft.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/haruny/craftcraft" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="ProgramsFolder" Name="Programs">
+          <Directory Id="INSTALLFOLDER" Name="CraftCraft" />
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder" />
+    </Directory>
+
+    <!-- Files in a user's profile need a registry value as their key path, and their folders
+         removed explicitly (Programs only when it's left empty). -->
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="Launcher" Guid="*">
+        <File Id="craftcraft.exe" Source="$(var.Exe)" />
+        <RegistryValue Root="HKCU" Key="Software\CraftCraft\Installer" Name="Launcher" Type="integer" Value="1" KeyPath="yes" />
+        <!-- Taking over from install.ps1: its uninstaller and Settings > Apps entry. -->
+        <RemoveFile Id="ScriptUninstaller" Name="uninstall.ps1" On="install" />
+        <RemoveRegistryKey Action="removeOnInstall" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\CraftCraft" />
+        <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+        <RemoveFolder Id="RemoveProgramsFolder" Directory="ProgramsFolder" On="uninstall" />
+      </Component>
+    </DirectoryRef>
+    <DirectoryRef Id="ProgramMenuFolder">
+      <Component Id="StartMenu" Guid="*">
+        <Shortcut Id="StartMenuShortcut" Name="CraftCraft" Description="Install, update and open software rewritten in Rust"
+                  Target="[#craftcraft.exe]" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\CraftCraft\Installer" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="Main" Title="CraftCraft" Level="1">
+      <ComponentRef Id="Launcher" />
+      <ComponentRef Id="StartMenu" />
+    </Feature>
+
+    <!-- A launcher running in the tray holds its file open and ignores the Restart Manager's
+         requests to close, so it's stopped first, as install.ps1 does. -->
+    <SetProperty Id="WixQuietExecCmdLine" Action="SetStopLauncher" Sequence="execute" Before="StopLauncher"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -Command &quot;Get-Process craftcraft -ErrorAction SilentlyContinue | Where-Object Path -eq '[INSTALLFOLDER]craftcraft.exe' | Stop-Process -Force&quot;" />
+    <CustomAction Id="StopLauncher" BinaryKey="WixCA" DllEntry="WixQuietExec" Execute="immediate" Return="ignore" />
+
+    <!-- Uninstalling (not upgrading) also stops it starting at sign-in. install.ps1 passes
+         KEEPSETTINGS=1 when it takes over, since it puts the launcher back where it was. -->
+    <SetProperty Id="WixQuietExecCmdLine" Action="SetForgetLogon" Sequence="execute" After="StopLauncher"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -Command &quot;Remove-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name CraftCraft -ErrorAction SilentlyContinue&quot;" />
+    <CustomAction Id="ForgetLogon" BinaryKey="WixCA" DllEntry="WixQuietExec" Execute="immediate" Return="ignore" />
+
+    <!-- Opened by double-clicking (full UI), it starts CraftCraft once installed, as the script does. -->
+    <CustomAction Id="Launch" FileKey="craftcraft.exe" ExeCommand="" Return="asyncNoWait" Impersonate="yes" />
+
+    <InstallExecuteSequence>
+      <Custom Action="StopLauncher" Before="InstallValidate" />
+      <Custom Action="ForgetLogon" After="SetForgetLogon">REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE AND NOT KEEPSETTINGS</Custom>
+      <Custom Action="Launch" After="InstallFinalize">UILevel = 5 AND NOT REMOVE</Custom>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>

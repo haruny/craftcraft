@@ -32,6 +32,7 @@ pub fn install(
     app: &App,
     release: &Release,
     platform: Platform,
+    for_everyone: bool,
     mut stage: impl FnMut(Stage),
 ) -> Result<Installed, String> {
     let (spec, method) = app.asset_for(platform).ok_or_else(|| format!("{} has no build for {}", app.name, platform.key()))?;
@@ -79,7 +80,7 @@ pub fn install(
         }
         Method::Installer => {
             stage(Stage::Installer);
-            run_installer(&file, platform.os)?;
+            run_installer(&file, platform.os, for_everyone)?;
             (file, Vec::new())
         }
         Method::Unknown => return Err("this launcher doesn't know how to install that file; update CraftCraft".into()),
@@ -288,11 +289,20 @@ fn remove_shims(paths: &Paths, id: &str) {
     }
 }
 
-fn run_installer(file: &Path, os: Os) -> Result<(), String> {
+fn run_installer(file: &Path, os: Os, for_everyone: bool) -> Result<(), String> {
     let lower = file.to_string_lossy().to_ascii_lowercase();
     let status = match os {
         // `/passive` shows progress without wizard pages; an installed older version is upgraded in place.
-        Os::Windows if lower.ends_with(".msi") => Command::new("msiexec").arg("/i").arg(file).arg("/passive").status(),
+        // An installer that can go either way installs for the current user unless told otherwise, and
+        // won't upgrade a copy installed for everyone from there.
+        Os::Windows if lower.ends_with(".msi") => {
+            let mut msiexec = Command::new("msiexec");
+            msiexec.arg("/i").arg(file).arg("/passive");
+            if for_everyone {
+                msiexec.arg("ALLUSERS=1");
+            }
+            msiexec.status()
+        }
         Os::Windows => Command::new(file).status(),
         // These open the disk image, the macOS Installer, or the Linux software centre, and
         // return straight away; the user finishes the install there.
@@ -412,7 +422,7 @@ mod tests {
         let crate::github::Lookup::Found(release) = releases.latest(&app.repo) else { panic!("no ripgrep release") };
 
         let mut stages = 0;
-        let installed = install(&paths, &http, app, &release, Platform::current().unwrap(), |_| stages += 1).unwrap();
+        let installed = install(&paths, &http, app, &release, Platform::current().unwrap(), false, |_| stages += 1).unwrap();
         assert!(stages > 1);
         assert!(installed.verified, "GitHub publishes ripgrep's SHA-256");
         assert_eq!(installed.tag, release.tag);
