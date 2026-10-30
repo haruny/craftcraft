@@ -232,7 +232,9 @@ jobs:
           msiexec /i "$env:RUNNER_TEMP\update\craftcraft-windows-x86_64.msi" /qn
           if (Get-Process craftcraft -ErrorAction SilentlyContinue) { throw 'the update left the old launcher running' }
           if ((listed).Count -ne 1) { throw "after the update, Settings > Apps lists CraftCraft $((listed).Count) times" }
-          # An update keeps the launcher starting at sign-in; uninstalling turns that off.
+          # An update keeps the launcher starting at sign-in; uninstalling turns that off. The runner's
+          # user has no Run key yet; the launcher creates it when Start on logon is turned on.
+          New-Item HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -ErrorAction SilentlyContinue | Out-Null
           Set-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name CraftCraft -Value "`"$exe`" --background"
           ./scripts/msi.ps1 -Exe $exe -Arch x86_64 -Out "$env:RUNNER_TEMP\update2"
           msiexec /i "$env:RUNNER_TEMP\update2\craftcraft-windows-x86_64.msi" /qn
