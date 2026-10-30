@@ -34,9 +34,10 @@
     </Directory>
 
     <!-- Files in a user's profile need a registry value as their key path, and their folders
-         removed explicitly (Programs only when it's left empty). -->
+         removed explicitly (Programs only when it's left empty). WiX can't generate the GUID of a
+         component with a file and a registry key path, so this one is fixed: never change it. -->
     <DirectoryRef Id="INSTALLFOLDER">
-      <Component Id="Launcher" Guid="*">
+      <Component Id="Launcher" Guid="BF4436E5-58D9-4A64-A073-4B761FA15305">
         <File Id="craftcraft.exe" Source="$(var.Exe)" />
         <RegistryValue Root="HKCU" Key="Software\CraftCraft\Installer" Name="Launcher" Type="integer" Value="1" KeyPath="yes" />
         <!-- Taking over from install.ps1: its uninstaller and Settings > Apps entry. -->
