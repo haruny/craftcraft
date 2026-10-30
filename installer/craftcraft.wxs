@@ -35,7 +35,8 @@
 
     <!-- Files in a user's profile need a registry value as their key path, and their folders
          removed explicitly (Programs only when it's left empty). WiX can't generate the GUID of a
-         component with a file and a registry key path, so this one is fixed: never change it. -->
+         component with a file and a registry key path, so this one is written out. Keep it while
+         the exe installs to the same place; if that ever changes, the component needs a new one. -->
     <DirectoryRef Id="INSTALLFOLDER">
       <Component Id="Launcher" Guid="BF4436E5-58D9-4A64-A073-4B761FA15305">
         <File Id="craftcraft.exe" Source="$(var.Exe)" />

@@ -214,7 +214,12 @@ jobs:
           $exe = "$env:LOCALAPPDATA\Programs\CraftCraft\craftcraft.exe"
           $link = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\CraftCraft.lnk"
           function msiexec { $p = Start-Process msiexec.exe -ArgumentList $args -Wait -PassThru; if ($p.ExitCode -ne 0) { throw "msiexec $args stopped with $($p.ExitCode)" } }
-          function listed { @(Get-ChildItem HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall | Where-Object { (Get-ItemProperty $_.PSPath).DisplayName -eq 'CraftCraft' }) }
+          # Settings > Apps lists install.ps1's copy from the Uninstall key (missing until something
+          # writes one), and the .msi's from Windows Installer's own records, found by upgrade code.
+          function listed {
+            Get-ChildItem HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath).DisplayName -eq 'CraftCraft' }
+            foreach ($code in (New-Object -ComObject WindowsInstaller.Installer).RelatedProducts('{8241B415-3A84-4BFB-94C1-7F03F92257D9}')) { $code }
+          }
 
           msiexec /i $msi /qn
           if ((Get-AuthenticodeSignature $exe).Status -ne 'Valid') { throw 'the installed exe is not signed' }
