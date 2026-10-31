@@ -1,5 +1,7 @@
 # CraftCraft
 
+**English** · [Français](README.fr.md) · [Español](README.es.md) · [中文](README.zh-CN.md) · [हिन्दी](README.hi.md) · [العربية](README.ar.md) · [বাংলা](README.bn.md) · [Português](README.pt.md)
+
 [![Downloads](https://img.shields.io/github/downloads/haruny/craftcraft/total?color=e8662e)](https://github.com/haruny/craftcraft/releases)
 [![Latest release](https://img.shields.io/github/v/release/haruny/craftcraft?color=e8662e)](https://github.com/haruny/craftcraft/releases/latest)
 
@@ -61,6 +63,26 @@ adds itself to the Start menu.
 
 **Settings → Debug mode** (everywhere) logs what CraftCraft does to `logs/craftcraft.log` in the data
 folder, and keeps downloaded installers and their logs instead of deleting them.
+
+## Languages
+
+CraftCraft is in English unless you pick another language in **Settings → Language**: Français,
+Español, 中文（简体）, हिन्दी, العربية, বাংলা or Português. The change applies straight away, tray
+menu included. Text that comes from the catalog (app taglines and descriptions, categories,
+notices) stays in English, as do error details from the system.
+
+The translations are in [`locales/`](locales), one JSON file per language, built into the
+launcher; anything a translation lacks falls back to English. They're new, so corrections from
+native speakers are welcome: edit the file and run `cargo test`, which checks that every file has
+the same keys and placeholders as `en.json`.
+
+Chinese, Hindi, Arabic and Bengali need letters the bundled Geist font doesn't have, so the
+launcher uses a font already on the computer: Microsoft YaHei, Nirmala UI and Segoe UI on Windows;
+PingFang or Hiragino, Kohinoor and SF Arabic or Geeza Pro on macOS; Noto on Linux (Debian/Ubuntu:
+`fonts-noto-cjk` and `fonts-noto-core`). If there's none, Settings says so. Arabic text reads right
+to left, but the window's layout stays left to right.
+
+The READMEs in other languages are translations of this one, which is the reference.
 
 ## The catalog drives everything
 
@@ -267,6 +289,7 @@ Those services see your IP address, as for any web request.
 ```
 catalog/         catalog.json and featured.json; check.mjs (CI runs it on every change); publish.mjs
                  and releases.mjs, which build what's published (catalog.json, releases.json)
+locales/         the launcher's text, one JSON file per language
 install/         install.ps1 and install.sh, the one-line installers
 telemetry/       the usage statistics endpoint (a Cloudflare Worker)
 installer/       craftcraft.wxs, the Windows .msi (WiX 3)
@@ -281,6 +304,8 @@ src/install.rs   download, verify, unpack, swap in, shims, uninstall
 src/system.rs    opening apps, terminals, folders and links; PATH
 src/icons.rs     app icons, cached and decoded off the UI thread
 src/worker.rs    background jobs and the events they send the UI
+src/i18n.rs      the launcher's text in each language (from locales/), and right-to-left lines
+src/fonts.rs     finding a system font for Chinese, Hindi, Arabic and Bengali
 src/tray.rs      the tray (menu bar) icon on Windows and macOS; on Windows, keeping to one running copy
 src/ui.rs        the window
 src/theme.rs     colours, fonts and widget styling

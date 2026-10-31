@@ -4,6 +4,9 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle, Theme, Vec2};
 
+use crate::fonts;
+use crate::i18n::Lang;
+
 /// One theme's colours.
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -64,20 +67,9 @@ pub fn strong() -> FontFamily {
     FontFamily::Name("strong".into())
 }
 
-pub fn install(ctx: &egui::Context) {
-    let mut fonts = FontDefinitions::default();
-    let mut add = |name: &str, bytes: &'static [u8]| {
-        fonts.font_data.insert(name.into(), Arc::new(FontData::from_static(bytes)));
-    };
-    add("geist", include_bytes!("../assets/fonts/Geist-Regular.ttf"));
-    add("geist-semibold", include_bytes!("../assets/fonts/Geist-SemiBold.ttf"));
-    add("geist-mono", include_bytes!("../assets/fonts/GeistMono-Medium.ttf"));
-    // egui's own fonts stay behind Geist for symbols and emoji Geist doesn't have.
-    let fallbacks = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "geist".into());
-    fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "geist-mono".into());
-    fonts.families.insert(strong(), std::iter::once("geist-semibold".to_string()).chain(fallbacks).collect());
-    ctx.set_fonts(fonts);
+/// Sets up fonts for `langs`, and the styles.
+pub fn install(ctx: &egui::Context, langs: &[Lang]) {
+    set_fonts(ctx, langs);
 
     for (theme, p) in [(Theme::Dark, DARK), (Theme::Light, LIGHT)] {
         ctx.style_mut_of(theme, |style| {
@@ -128,4 +120,37 @@ pub fn install(ctx: &egui::Context) {
             }
         });
     }
+}
+
+/// Geist, then a system font for each of `langs` it doesn't cover (the first one's comes first),
+/// then egui's own fonts for symbols and emoji. Returns the languages no font was found for.
+pub fn set_fonts(ctx: &egui::Context, langs: &[Lang]) -> Vec<Lang> {
+    let mut fonts = FontDefinitions::default();
+    let mut add = |name: &str, bytes: &'static [u8]| {
+        fonts.font_data.insert(name.into(), Arc::new(FontData::from_static(bytes)));
+    };
+    add("geist", include_bytes!("../assets/fonts/Geist-Regular.ttf"));
+    add("geist-semibold", include_bytes!("../assets/fonts/Geist-SemiBold.ttf"));
+    add("geist-mono", include_bytes!("../assets/fonts/GeistMono-Medium.ttf"));
+    let mut missing = Vec::new();
+    let mut system: Vec<String> = Vec::new();
+    for &lang in langs.iter().filter(|l| !l.latin()) {
+        match fonts::system(lang) {
+            Some((name, data)) => {
+                if !system.contains(&name) {
+                    fonts.font_data.insert(name.clone(), data);
+                    system.push(name);
+                }
+            }
+            None => missing.push(lang),
+        }
+    }
+    let fallbacks = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    let family = |first: &str, rest: &[String]| -> Vec<String> { std::iter::once(first.to_string()).chain(system.iter().cloned()).chain(rest.iter().cloned()).collect() };
+    let monospace = fonts.families.get(&FontFamily::Monospace).cloned().unwrap_or_default();
+    fonts.families.insert(FontFamily::Proportional, family("geist", &fallbacks));
+    fonts.families.insert(FontFamily::Monospace, family("geist-mono", &monospace));
+    fonts.families.insert(strong(), family("geist-semibold", &fallbacks));
+    ctx.set_fonts(fonts);
+    missing
 }

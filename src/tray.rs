@@ -10,6 +10,8 @@ use eframe::egui;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
+use crate::i18n;
+
 /// What the tray icon (or another copy of the launcher) asks for.
 pub enum Action {
     Show,
@@ -19,6 +21,8 @@ pub enum Action {
 
 pub struct Tray {
     icon: TrayIcon,
+    /// The menu's items, to relabel when the language changes.
+    items: [MenuItem; 3],
     #[cfg(windows)]
     tx: Sender<Action>,
     actions: Receiver<Action>,
@@ -28,12 +32,11 @@ pub struct Tray {
 impl Tray {
     pub fn new(ctx: &egui::Context) -> Result<Self, String> {
         let (tx, actions) = channel();
-        let open = MenuItem::new("Open CraftCraft", true, None);
-        let check = MenuItem::new("Check for updates", true, None);
-        let quit = MenuItem::new(if cfg!(target_os = "macos") { "Quit CraftCraft" } else { "Quit" }, true, None);
+        let [open, check, quit] = labels().map(|label| MenuItem::new(label, true, None));
         let menu = Menu::new();
         menu.append_items(&[&open, &check, &PredefinedMenuItem::separator(), &quit]).map_err(|e| e.to_string())?;
 
+        let items = [open.clone(), check.clone(), quit.clone()];
         let (open, check, quit) = (open.id().clone(), check.id().clone(), quit.id().clone());
         let send = notifier(&tx, ctx);
         MenuEvent::set_event_handler(Some(move |e: MenuEvent| match e.id {
@@ -65,6 +68,7 @@ impl Tray {
         let icon = builder.build().map_err(|e| e.to_string())?;
         Ok(Self {
             icon,
+            items,
             #[cfg(windows)]
             tx,
             actions,
@@ -76,12 +80,25 @@ impl Tray {
         self.actions.try_iter()
     }
 
+    /// Puts the menu in the current language.
+    pub fn relabel(&self) {
+        for (item, label) in self.items.iter().zip(labels()) {
+            item.set_text(label);
+        }
+    }
+
     pub fn set_tooltip(&mut self, text: String) {
         if text != self.tooltip {
             _ = self.icon.set_tooltip(Some(&text));
             self.tooltip = text;
         }
     }
+}
+
+/// The menu's items, in the current language. The system draws them, so they're as written.
+fn labels() -> [String; 3] {
+    let quit = if cfg!(target_os = "macos") { "tray.quit_macos" } else { "tray.quit" };
+    ["tray.open", "tray.check", quit].map(|key| i18n::text(key, &[]))
 }
 
 /// Sends an action and wakes the UI, which runs even while the window is hidden.

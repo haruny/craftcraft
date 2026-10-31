@@ -16,6 +16,7 @@ use crate::paths::Paths;
 use crate::state::{Installed, MAX_CHECK_HOURS, Sort, State};
 use crate::theme::{self, Palette};
 use crate::worker::{Event, Worker};
+use crate::i18n::{self, Lang, t, tf, tn};
 use crate::{debug, now, system, telemetry, version};
 
 const SIDEBAR_WIDTH: f32 = 236.0;
@@ -90,6 +91,10 @@ pub struct Launcher {
     search: String,
     filter: Filter,
     show_settings: bool,
+    /// Fonts for every language are loaded (for the language picker), not just the chosen one's.
+    all_fonts: bool,
+    /// Languages no system font was found for.
+    missing_fonts: Vec<Lang>,
     /// How tall the sidebar's bottom section was last frame, so the sections above can stop short of it.
     sidebar_bottom: f32,
     message: Option<(String, Instant)>,
@@ -114,8 +119,9 @@ pub struct Launcher {
 
 impl Launcher {
     pub fn new(cc: &eframe::CreationContext<'_>, paths: Paths) -> Self {
-        theme::install(&cc.egui_ctx);
         let state = State::load(&paths);
+        i18n::set(state.settings.language);
+        theme::install(&cc.egui_ctx, &[state.settings.language]);
         debug::init(&paths.logs(), state.settings.debug);
         debug::log(format_args!("started, data folder {}", paths.root.display()));
         install::tidy(&paths);
@@ -150,6 +156,8 @@ impl Launcher {
             search: String::new(),
             filter: Filter::All,
             show_settings: false,
+            all_fonts: false,
+            missing_fonts: Vec::new(),
             sidebar_bottom: 120.0,
             message: None,
             #[cfg(tray)]
@@ -246,11 +254,8 @@ impl Launcher {
             }
         }
         let updates = self.update_count();
-        let tooltip = match updates {
-            0 => "CraftCraft".to_string(),
-            1 => "CraftCraft: 1 update".to_string(),
-            n => format!("CraftCraft: {n} updates"),
-        };
+        // The system draws the tooltip, so it's as written.
+        let tooltip = if updates == 0 { "CraftCraft".to_string() } else { i18n::plural_text("tray.updates", updates as u64, &[]) };
         if let Some(tray) = &mut self.tray {
             tray.set_tooltip(tooltip);
         }
@@ -396,8 +401,8 @@ impl Launcher {
                     Ok(installed) => {
                         telemetry::record(&self.state, if update { "app_update" } else { "app_install" }, Some((&id, &installed.tag)), None);
                         let name = self.app_name(&id);
-                        let note = if installed.verified { "" } else { " (unverified: no published checksum)" };
-                        self.flash(format!("{name} {} is installed{note}", version::display(&installed.tag)));
+                        let key = if installed.verified { "flash.installed" } else { "flash.installed_unverified" };
+                        self.flash(tf(key, &[("name", &name), ("version", &version::display(&installed.tag))]));
                         self.app_errors.remove(&id);
                         // A system install is tracked by detection, which sees what's really there.
                         if installed.method == Method::Installer {
@@ -421,7 +426,7 @@ impl Launcher {
                 match result {
                     Ok(()) => {
                         telemetry::record(&self.state, "app_uninstall", Some((&id, &self.version_of(&id))), None);
-                        self.flash(format!("{} was removed", self.app_name(&id)));
+                        self.flash(tf("flash.removed", &[("name", &self.app_name(&id))]));
                         self.state.installed.remove(&id);
                         self.state.save(&self.paths);
                     }
@@ -645,19 +650,19 @@ impl Launcher {
             let updates = self.update_count();
             let total = self.catalog.as_ref().map_or(0, |c| c.apps.len());
             let mut chosen = None;
-            section_label(ui, p, "Library");
-            if nav_item(ui, p, "All apps", total, self.filter == Filter::All, false) {
+            section_label(ui, p, &t("nav.library"));
+            if nav_item(ui, p, &t("nav.all"), total, self.filter == Filter::All, false) {
                 chosen = Some(Filter::All);
             }
-            if nav_item(ui, p, "Installed", installed, self.filter == Filter::Installed, false) {
+            if nav_item(ui, p, &t("nav.installed"), installed, self.filter == Filter::Installed, false) {
                 chosen = Some(Filter::Installed);
             }
-            if nav_item(ui, p, "Updates", updates, self.filter == Filter::Updates, updates > 0) {
+            if nav_item(ui, p, &t("nav.updates"), updates, self.filter == Filter::Updates, updates > 0) {
                 chosen = Some(Filter::Updates);
             }
             if let Some(catalog) = &self.catalog {
                 ui.add_space(14.0);
-                section_label(ui, p, "Categories");
+                section_label(ui, p, &t("nav.categories"));
                 for c in &catalog.categories {
                     let n = catalog.apps.iter().filter(|a| a.category == c.id).count();
                     if n > 0 {
@@ -677,13 +682,13 @@ impl Launcher {
             ui.add_space(2.0);
             ui.label(RichText::new(format!("CraftCraft {}", env!("CARGO_PKG_VERSION"))).small().color(p.subtle));
             let (text, color) = if self.checking_catalog {
-                ("Checking the catalog…".to_string(), p.subtle)
+                (t("sidebar.checking_catalog"), p.subtle)
             } else if self.checking_releases {
-                ("Checking for updates…".to_string(), p.subtle)
+                (t("sidebar.checking_updates"), p.subtle)
             } else if self.catalog_error.is_some() {
-                ("Catalog check failed".to_string(), ui.visuals().warn_fg_color)
+                (t("sidebar.check_failed"), ui.visuals().warn_fg_color)
             } else if self.state.last_check > 0 {
-                (format!("Checked {}", ago(now() - self.state.last_check)), p.subtle)
+                (tf("sidebar.checked", &[("when", &ago(now() - self.state.last_check))]), p.subtle)
             } else {
                 (String::new(), p.subtle)
             };
@@ -692,15 +697,16 @@ impl Launcher {
                 status.on_hover_text(e);
             }
             if let Some(until) = self.worker.releases.rate_limited_until() {
-                ui.label(RichText::new(format!("GitHub limit reached; resumes in {}", minutes(until - now()))).small().color(p.subtle))
-                    .on_hover_text("Set GITHUB_TOKEN to a GitHub token to raise the limit from 60 to 5,000 requests an hour.");
+                let label = ui.label(RichText::new(tf("sidebar.rate_limited", &[("time", &minutes(until - now()))])).small().color(p.subtle));
+                hover(label, &i18n::text("sidebar.rate_limited_hint", &[]));
             }
             ui.add_space(6.0);
-            if nav_item(ui, p, "⚙  Settings", 0, self.show_settings, false) {
+            if nav_item(ui, p, &format!("⚙  {}", t("nav.settings")), 0, self.show_settings, false) {
                 self.show_settings = !self.show_settings;
             }
             let busy = self.checking_catalog || self.checking_releases;
-            if nav_item(ui, p, if busy { "⟳  Checking…" } else { "⟳  Check for updates" }, 0, false, false) && !busy {
+            let check = format!("⟳  {}", t(if busy { "nav.checking" } else { "nav.check" }));
+            if nav_item(ui, p, &check, 0, false, false) && !busy {
                 self.check_now();
             }
             self.sidebar_bottom = ui.min_rect().height();
@@ -709,9 +715,9 @@ impl Launcher {
 
     fn page_header(&mut self, ui: &mut egui::Ui, p: Palette) {
         let (title, subtitle) = match &self.filter {
-            Filter::All => ("All apps".to_string(), self.catalog.as_ref().map(|c| c.tagline.clone()).unwrap_or_default()),
-            Filter::Installed => ("Installed".to_string(), "Apps on this computer, whether CraftCraft installed them or not.".to_string()),
-            Filter::Updates => ("Updates".to_string(), "Newer versions of apps you have.".to_string()),
+            Filter::All => (t("nav.all"), self.catalog.as_ref().map(|c| c.tagline.clone()).unwrap_or_default()),
+            Filter::Installed => (t("nav.installed"), i18n::text("header.installed_subtitle", &[])),
+            Filter::Updates => (t("nav.updates"), i18n::text("header.updates_subtitle", &[])),
             Filter::Category(id) => {
                 let name = self.catalog.as_ref().and_then(|c| c.categories.iter().find(|c| &c.id == id)).map_or(id.clone(), |c| c.name.clone());
                 (name, String::new())
@@ -723,10 +729,10 @@ impl Launcher {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let waiting = self.update_queue.len();
                     if waiting > 0 {
-                        spinner_label(ui, p, &format!("Updating… {waiting} more to go"));
+                        spinner_label(ui, p, &tn("header.updating", waiting as u64, &[]));
                     } else {
                         let ready = self.updatable().len();
-                        if ready > 0 && primary(ui, p, "Update all").clicked() {
+                        if ready > 0 && primary(ui, p, &t("header.update_all")).clicked() {
                             self.update_all();
                         }
                     }
@@ -734,7 +740,7 @@ impl Launcher {
             }
         });
         if !subtitle.is_empty() {
-            ui.label(RichText::new(subtitle).color(p.muted));
+            para(ui, &subtitle, |t| t.color(p.muted));
         }
         ui.add_space(16.0);
 
@@ -756,9 +762,9 @@ impl Launcher {
                     self.state.save(&self.paths);
                 }
                 if roomy {
-                    ui.label(RichText::new("Sort").color(p.subtle));
+                    ui.label(RichText::new(t("header.sort")).color(p.subtle));
                     ui.add_space(12.0);
-                    ui.label(RichText::new(if shown == 1 { "1 app".to_string() } else { format!("{shown} apps") }).color(p.subtle));
+                    ui.label(RichText::new(tn("header.apps", shown as u64, &[])).color(p.subtle));
                 }
             });
         });
@@ -773,7 +779,7 @@ impl Launcher {
         let width = (ui.available_width() - beside).clamp(140.0, 340.0);
         let response = ui.add(
             egui::TextEdit::singleline(&mut self.search)
-                .hint_text("Search apps, or what they replace")
+                .hint_text(t("search.hint"))
                 .margin(Margin { left: 34, right: 10, top: 8, bottom: 8 })
                 .desired_width(width),
         );
@@ -783,7 +789,7 @@ impl Launcher {
         ui.painter().line_segment([c + Vec2::splat(3.6), c + Vec2::splat(7.4)], stroke);
         if !self.search.is_empty() {
             let x = egui::Rect::from_center_size(response.rect.right_center() - Vec2::new(16.0, 0.0), Vec2::splat(20.0));
-            let clear = ui.interact(x, ui.scope_id().with("clear-search"), Sense::click()).on_hover_text("Clear");
+            let clear = ui.interact(x, ui.scope_id().with("clear-search"), Sense::click()).on_hover_text(t("search.clear"));
             let color = if clear.hovered() { p.ink } else { p.subtle };
             ui.painter().text(x.center(), Align2::CENTER_CENTER, "✕", FontId::proportional(12.0), color);
             if clear.clicked() {
@@ -798,16 +804,16 @@ impl Launcher {
                 ui.add_space(120.0);
                 match &self.catalog_error {
                     Some(e) => {
-                        ui.label(RichText::new("Couldn't load the app catalog").family(theme::strong()).size(18.0));
+                        ui.label(RichText::new(t("catalog.load_failed")).family(theme::strong()).size(18.0));
                         ui.label(RichText::new(e).color(p.muted));
                         ui.add_space(8.0);
-                        if primary(ui, p, "Try again").clicked() {
+                        if primary(ui, p, &t("catalog.try_again")).clicked() {
                             self.check_now();
                         }
                     }
                     None => {
                         ui.spinner();
-                        ui.label(RichText::new("Loading the app catalog…").color(p.muted));
+                        ui.label(RichText::new(t("catalog.loading")).color(p.muted));
                     }
                 }
             });
@@ -815,15 +821,16 @@ impl Launcher {
         };
 
         if version::is_newer(&catalog.launcher.version, env!("CARGO_PKG_VERSION")) && crate::catalog::valid_repo(&catalog.launcher.repo) {
-            let text = format!("CraftCraft {} is available. You have {}.", catalog.launcher.version, env!("CARGO_PKG_VERSION"));
-            if banner(ui, p, p.action, "⬆", &text, None, &["Download"]).is_some() {
+            let text = tf("banner.launcher_update", &[("new", &catalog.launcher.version), ("current", &env!("CARGO_PKG_VERSION"))]);
+            if banner(ui, p, p.action, "⬆", &text, None, &[t("banner.download")]).is_some() {
                 system::open_url(&format!("https://github.com/{}/releases/latest", catalog.launcher.repo));
             }
         }
 
         if telemetry::available() && !self.state.usage.asked {
-            let body = "Which apps you install and open, with your CraftCraft version and type of computer, under a random id. Never your name, files or IP address. You can turn this off now or in Settings.";
-            match banner(ui, p, p.subtle, "ℹ", "CraftCraft shares anonymous usage statistics", Some(body), &["OK", "Turn off", "Privacy statement"]) {
+            let body = i18n::text("banner.usage_body", &[]);
+            let buttons = ["banner.ok", "banner.turn_off", "banner.privacy"].map(t);
+            match banner(ui, p, p.subtle, "ℹ", &t("banner.usage_title"), Some(&body), &buttons) {
                 Some(0) => self.set_share_usage(true),
                 Some(1) => self.set_share_usage(false),
                 Some(_) => system::open_url(PRIVACY_STATEMENT),
@@ -834,8 +841,12 @@ impl Launcher {
         let new_apps = self.state.new_apps(&catalog);
         if !new_apps.is_empty() {
             let names: Vec<_> = new_apps.iter().filter_map(|id| catalog.app(id)).map(|a| a.name.as_str()).collect();
-            let text = if names.len() == 1 { format!("New in the catalog: {}", names[0]) } else { format!("{} new apps: {}", names.len(), names.join(", ")) };
-            if banner(ui, p, Color32::from_rgb(0x3b, 0x82, 0xf6), "✦", &text, None, &["Got it"]).is_some() {
+            let text = if names.len() == 1 {
+                tf("banner.new_app", &[("name", &names[0])])
+            } else {
+                tn("banner.new_apps", names.len() as u64, &[("names", &names.join(", "))])
+            };
+            if banner(ui, p, Color32::from_rgb(0x3b, 0x82, 0xf6), "✦", &text, None, &[t("banner.got_it")]).is_some() {
                 self.state.mark_all_seen(&catalog);
                 self.state.save(&self.paths);
             }
@@ -844,8 +855,11 @@ impl Launcher {
         let notices: Vec<_> = catalog.notices.iter().filter(|n| !self.state.dismissed_notices.contains(&n.id)).collect();
         for notice in notices {
             let body = (!notice.body.is_empty()).then_some(notice.body.as_str());
-            let buttons: &[&str] = if notice.url.is_some() { &["Dismiss", "Learn more"] } else { &["Dismiss"] };
-            match banner(ui, p, p.subtle, "ℹ", &notice.title, body, buttons) {
+            let mut buttons = vec![t("banner.dismiss")];
+            if notice.url.is_some() {
+                buttons.push(t("banner.learn_more"));
+            }
+            match banner(ui, p, p.subtle, "ℹ", &notice.title, body, &buttons) {
                 Some(0) => {
                     self.state.dismissed_notices.insert(notice.id.clone());
                     self.state.save(&self.paths);
@@ -864,12 +878,12 @@ impl Launcher {
         if apps.is_empty() {
             ui.add_space(60.0);
             ui.vertical_centered(|ui| {
-                let text = match self.filter {
-                    Filter::Installed => "Nothing installed yet. Pick something from All apps.",
-                    Filter::Updates => "Everything is up to date.",
-                    _ => "No apps match.",
+                let key = match self.filter {
+                    Filter::Installed => "empty.installed",
+                    Filter::Updates => "empty.updates",
+                    _ => "empty.none",
                 };
-                ui.label(RichText::new(text).color(p.muted));
+                para(ui, &i18n::text(key, &[]), |t| t.color(p.muted));
             });
             return;
         }
@@ -911,16 +925,27 @@ impl Launcher {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&app.name).family(theme::strong()).size(16.5).color(p.ink));
                     if is_new {
-                        pill(ui, "NEW", p.action, Color32::WHITE);
+                        pill(ui, &t("card.new"), p.action, Color32::WHITE);
                     }
                     if self.is_featured(app) {
-                        pill(ui, "FEATURED", p.accent.gamma_multiply(0.16), p.accent);
+                        pill(ui, &t("card.featured"), p.accent.gamma_multiply(0.16), p.accent);
                     }
                 });
-                let mut job = LayoutJob::default();
-                job.append("Replaces ", 0.0, TextFormat::simple(FontId::proportional(12.5), p.subtle));
-                job.append(&app.replaces_text(), 0.0, TextFormat::simple(FontId::new(12.5, theme::strong()), p.muted));
-                ui.label(job);
+                // "Replaces {apps}", with the apps in medium weight, wherever the language puts them.
+                let replaces = app.replaces_text();
+                let template = i18n::text("card.replaces", &[]);
+                match template.split_once("{apps}") {
+                    Some((before, after)) if !i18n::current().rtl() => {
+                        let mut job = LayoutJob::default();
+                        job.append(before, 0.0, TextFormat::simple(FontId::proportional(12.5), p.subtle));
+                        job.append(&replaces, 0.0, TextFormat::simple(FontId::new(12.5, theme::strong()), p.muted));
+                        job.append(after, 0.0, TextFormat::simple(FontId::proportional(12.5), p.subtle));
+                        ui.label(job);
+                    }
+                    _ => {
+                        ui.label(RichText::new(tf("card.replaces", &[("apps", &replaces)])).size(12.5).color(p.muted));
+                    }
+                }
             });
         });
         ui.add_space(8.0);
@@ -950,8 +975,10 @@ impl Launcher {
                 Busy::Working(Stage::Downloading { done, total }) => {
                     let mb = |b: u64| b as f64 / 1_048_576.0;
                     let (fraction, text) = match total {
-                        Some(t) if *t > 0 => (*done as f32 / *t as f32, format!("{:.0} of {:.0} MB", mb(*done), mb(*t))),
-                        _ => (0.0, format!("{:.1} MB", mb(*done))),
+                        Some(total) if *total > 0 => {
+                            (*done as f32 / *total as f32, tf("card.downloaded_of", &[("done", &format!("{:.0}", mb(*done))), ("total", &format!("{:.0}", mb(*total)))]))
+                        }
+                        _ => (0.0, tf("card.downloaded", &[("done", &format!("{:.1}", mb(*done)))])),
                     };
                     ui.add(
                         egui::ProgressBar::new(fraction)
@@ -962,81 +989,89 @@ impl Launcher {
                             .corner_radius(CornerRadius::same(6)),
                     );
                 }
-                Busy::Working(Stage::Installing) => spinner_label(ui, p, "Installing…"),
-                Busy::Working(Stage::Installer) => spinner_label(ui, p, "Finish in the installer window…"),
-                Busy::Removing => spinner_label(ui, p, "Removing…"),
+                Busy::Working(Stage::Installing) => spinner_label(ui, p, &t("card.installing")),
+                Busy::Working(Stage::Installer) => spinner_label(ui, p, &t("card.finish_installer")),
+                Busy::Removing => spinner_label(ui, p, &t("card.removing")),
             }
             return;
         }
         let Some(platform) = self.platform else { return };
         let installed = self.managed(&app.id).cloned();
-        let shown = |v: &Option<String>| v.as_deref().map(version::display).map(|v| format!(" {v}")).unwrap_or_default();
 
         // Left: where it stands.
         let (status_text, status_color, hint) = match self.status(app) {
-            Status::NoBuild => ("Not available for this system".to_string(), p.subtle, None),
+            Status::NoBuild => (t("status.no_build"), p.subtle, None),
             Status::Unknown => match self.releases.get(&app.id) {
-                Some(Lookup::Failed(e)) => ("Couldn't check releases".to_string(), p.subtle, Some(e.clone())),
-                Some(Lookup::NoRelease) => ("No release yet".to_string(), p.subtle, None),
-                _ => ("Checking…".to_string(), p.subtle, None),
+                Some(Lookup::Failed(e)) => (t("status.check_failed"), p.subtle, Some(e.clone())),
+                Some(Lookup::NoRelease) => (t("status.no_release"), p.subtle, None),
+                _ => (t("status.checking"), p.subtle, None),
             },
-            Status::Available(r) => (format!("v{} · {}", version::display(&r.tag), r.date()), p.subtle, None),
+            Status::Available(r) => (tf("status.available", &[("version", &version::display(&r.tag)), ("date", &r.date())]), p.subtle, None),
             Status::Installed { version, latest, external } => {
-                let current = if latest.is_some() && version.is_some() { " · up to date" } else { "" };
                 let hint = if external {
-                    Some(format!("Found on this computer: installed outside CraftCraft{}.", self.scope_note(app, platform)))
+                    Some(i18n::text(self.scope_note(app, platform), &[]))
                 } else if installed.as_ref().is_some_and(|i| !i.verified) {
-                    Some("This download had no published SHA-256, so it couldn't be verified.".to_string())
+                    Some(i18n::text("hint.unverified", &[]))
                 } else {
                     None
                 };
-                (format!("✔ Installed{}{current}", shown(&version)), p.good, hint)
+                let text = match version.as_deref().map(version::display) {
+                    Some(v) if latest.is_some() => tf("status.installed_current", &[("version", &v)]),
+                    Some(v) => tf("status.installed_version", &[("version", &v)]),
+                    None => t("status.installed"),
+                };
+                (text, p.good, hint)
             }
-            Status::Update { from, to, .. } => (format!("Update:{} → {}", shown(&from), version::display(&to.tag)), p.accent, None),
+            Status::Update { from, to, .. } => {
+                let to = version::display(&to.tag);
+                let text = match from.as_deref().map(version::display) {
+                    Some(from) => tf("status.update", &[("from", &from), ("to", &to)]),
+                    None => tf("status.update_to", &[("to", &to)]),
+                };
+                (text, p.accent, None)
+            }
         };
         // Or where it went wrong last time: "Installer failed: …".
         let (status_text, status_color, hint) = match self.app_errors.get(&app.id) {
-            Some(failure) => (format!("⚠ {failure}"), ui.visuals().error_fg_color, Some(failure_details(failure))),
+            Some(failure) => (tf("status.failed", &[("failure", &failure_text(failure))]), ui.visuals().error_fg_color, Some(failure_details(failure))),
             None => (status_text, status_color, hint),
         };
 
         // Right: what you can do. It goes first, so the status on the left gets the room that's
         // left, cut short if need be (the whole of it is on hover).
-        let open_label = if app.kind == Kind::Gui { "Open" } else { "Open in terminal" };
+        let open_label = t(if app.kind == Kind::Gui { "action.open" } else { "action.open_terminal" });
         let (mut install, mut open) = (None, false);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.menu_button(RichText::new("⋯").size(16.0), |ui| self.more_menu(ui, app, installed.as_ref(), platform));
             match self.status(app) {
                 Status::Available(r) => {
-                    if primary(ui, p, "Install").clicked() {
+                    if primary(ui, p, &t("action.install")).clicked() {
                         install = Some(r.clone());
                     }
                 }
                 Status::Update { to, external, .. } => {
                     let separate = separate_copy(app, platform, external);
-                    let button = primary(ui, p, if separate { "Install latest" } else { "Update" });
+                    let button = primary(ui, p, &t(if separate { "action.install_latest" } else { "action.update" }));
                     let button = if separate {
-                        button.on_hover_text("This copy was installed outside CraftCraft (winget, cargo…). CraftCraft will install its own, up-to-date copy.")
+                        hover(button, &i18n::text("hint.separate_copy", &[]))
                     } else if self.detected.get(&app.id).is_some_and(|d| d.for_everyone) {
-                        button.on_hover_text(
-                            "This copy is installed for everyone on this computer, so Windows asks for an administrator's approval to update it.",
-                        )
+                        hover(button, &i18n::text("hint.for_everyone", &[]))
                     } else {
                         button
                     };
                     if button.clicked() {
                         install = Some(to.clone());
                     }
-                    open = ui.button(open_label).clicked();
+                    open = ui.button(&open_label).clicked();
                 }
-                Status::Installed { .. } => open = ui.button(open_label).clicked(),
+                Status::Installed { .. } => open = ui.button(&open_label).clicked(),
                 Status::Unknown | Status::NoBuild => {}
             }
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 let label = egui::Label::new(RichText::new(status_text).small().color(status_color)).truncate();
                 let label = ui.add(label.show_tooltip_when_elided(hint.is_none()));
                 if let Some(hint) = hint {
-                    label.on_hover_text(hint);
+                    hover(label, &hint);
                 }
             });
         });
@@ -1048,17 +1083,18 @@ impl Launcher {
         }
     }
 
-    /// Who a copy found in Windows' list of installed programs is for, to add to its description.
+    /// The description of a copy installed outside the launcher, with who it's for when it was
+    /// found in Windows' list of installed programs: a translation key.
     fn scope_note(&self, app: &App, platform: Platform) -> &'static str {
         match self.detected.get(&app.id) {
             Some(d) if platform.os == crate::catalog::Os::Windows && d.uninstall.is_some() => {
                 if d.for_everyone {
-                    ", for everyone"
+                    "hint.external_everyone"
                 } else {
-                    ", just for you"
+                    "hint.external_you"
                 }
             }
-            _ => "",
+            _ => "hint.external",
         }
     }
 
@@ -1066,59 +1102,59 @@ impl Launcher {
         ui.set_min_width(180.0);
         if let Some(failure) = self.app_errors.get(&app.id) {
             if let Some(log) = &failure.log
-                && ui.button("Installer log").on_hover_text("Windows Installer's own record of what happened.").clicked()
+                && hover(ui.button(t("menu.installer_log")), &i18n::text("menu.installer_log_hint", &[])).clicked()
             {
                 system::open_file(log);
             }
-            if ui.button("Copy error").clicked() {
+            if ui.button(t("menu.copy_error")).clicked() {
                 ui.ctx().copy_text(failure_details(failure));
             }
             ui.separator();
         }
         if let Some(home) = &app.homepage
-            && ui.button("Website").clicked()
+            && ui.button(t("menu.website")).clicked()
         {
             system::open_url(home);
         }
-        if ui.button("Source code").clicked() {
+        if ui.button(t("menu.source")).clicked() {
             system::open_url(&app.repo_url());
         }
         if let Some(Lookup::Found(r)) = self.releases.get(&app.id)
-            && ui.button(format!("Release notes ({})", version::display(&r.tag))).clicked()
+            && ui.button(tf("menu.release_notes", &[("version", &version::display(&r.tag))])).clicked()
         {
             let repo = app.repo_url();
             system::open_url(if r.html_url.starts_with(&repo) { &r.html_url } else { &repo });
         }
         if let Status::Installed { latest: Some(r), external: true, .. } = self.status(app)
             && app.asset_for(platform).is_some()
-            && ui.button("Reinstall latest").clicked()
+            && ui.button(t("menu.reinstall")).clicked()
         {
             let r = r.clone();
             self.start_install(app, r, platform);
         }
         if let Some(i) = installed {
             ui.separator();
-            if ui.button("Show files").clicked() {
+            if ui.button(t("menu.show_files")).clicked() {
                 system::reveal(&i.path);
             }
-            if ui.button("Uninstall").clicked() {
+            if ui.button(t("menu.uninstall")).clicked() {
                 self.busy.insert(app.id.clone(), Busy::Removing);
                 self.worker.uninstall(app.id.clone(), i.clone());
             }
         } else if let Some(found) = self.detected.get(&app.id).cloned() {
             ui.separator();
             if let Some(exe) = &found.exe
-                && ui.button("Show files").clicked()
+                && ui.button(t("menu.show_files")).clicked()
             {
                 system::reveal(exe);
             }
             if let Some(command) = found.uninstall {
-                if ui.button("Uninstall…").on_hover_text("Runs the app's own uninstaller.").clicked() {
+                if hover(ui.button(t("menu.uninstall_external")), &i18n::text("menu.uninstall_external_hint", &[])).clicked() {
                     self.busy.insert(app.id.clone(), Busy::Removing);
                     self.worker.uninstall_external(app.id.clone(), command);
                 }
             } else if platform.os == crate::catalog::Os::Macos
-                && ui.button("Uninstall…").on_hover_text("Shows it in Applications; move it to the Bin.").clicked()
+                && hover(ui.button(t("menu.uninstall_external")), &i18n::text("menu.uninstall_macos_hint", &[])).clicked()
             {
                 system::open_system_uninstall(platform.os);
             }
@@ -1126,7 +1162,7 @@ impl Launcher {
         let license = Some(app.license.as_str()).filter(|l| !l.is_empty()).or_else(|| self.index.get(&app.id).and_then(|e| e.license.as_deref()));
         if let Some(license) = license {
             ui.separator();
-            ui.label(RichText::new(format!("License: {license}")).small().weak());
+            ui.label(RichText::new(tf("menu.license", &[("license", &license)])).small().weak());
         }
     }
 
@@ -1191,9 +1227,51 @@ impl Launcher {
         });
     }
 
+    /// The language picker. Each language is listed in itself, so the picker needs every
+    /// language's font: they're loaded the first time it's shown.
+    fn language(&mut self, ui: &mut egui::Ui, p: Palette) {
+        if !self.all_fonts {
+            self.all_fonts = true;
+            self.load_fonts(ui.ctx());
+        }
+        heading(ui, "settings.language");
+        let current = self.state.settings.language;
+        let mut chosen = current;
+        egui::ComboBox::from_id_salt("language").selected_text(current.name()).width(200.0).show_ui(ui, |ui| {
+            for lang in Lang::ALL {
+                ui.selectable_value(&mut chosen, lang, lang.name());
+            }
+        });
+        if chosen != current {
+            self.state.settings.language = chosen;
+            i18n::set(chosen);
+            self.load_fonts(ui.ctx());
+            #[cfg(tray)]
+            if let Some(tray) = &self.tray {
+                tray.relabel();
+            }
+            self.state.save(&self.paths);
+        }
+        if self.missing_fonts.contains(&chosen) {
+            ui.label(RichText::new(t("settings.language_no_font")).small().color(ui.visuals().warn_fg_color));
+        } else if chosen != Lang::En {
+            note(ui, p, "settings.language_note");
+        }
+    }
+
+    /// The chosen language's font first, then (once the picker has been shown) the others'.
+    fn load_fonts(&mut self, ctx: &egui::Context) {
+        let chosen = self.state.settings.language;
+        let mut langs = vec![chosen];
+        if self.all_fonts {
+            langs.extend(Lang::ALL.into_iter().filter(|l| *l != chosen));
+        }
+        self.missing_fonts = theme::set_fonts(ctx, &langs);
+    }
+
     fn settings(&mut self, ctx: &egui::Context, p: Palette) {
         let mut open = self.show_settings;
-        egui::Window::new(RichText::new("Settings").family(theme::strong()).size(16.0))
+        egui::Window::new(RichText::new(t("settings.title")).family(theme::strong()).size(16.0))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -1201,118 +1279,118 @@ impl Launcher {
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .frame(Frame::window(&ctx.global_style()).inner_margin(Margin::same(20)))
             .show(ctx, |ui| {
+                self.language(ui, p);
+                ui.add_space(14.0);
+
                 let settings = &mut self.state.settings;
+                // A checkbox, the number of hours, and the rest of the sentence.
+                let sentence = i18n::plural_text("settings.auto_check", u64::from(settings.check_hours), &[]);
+                let (before, after) = sentence.split_once("{hours}").unwrap_or((&sentence, ""));
+                let (before, after) = (i18n::display(before.trim()), i18n::display(after.trim()));
+                // Right to left, the sentence starts at the right: the same pieces, the other way round.
+                let rtl = i18n::is_rtl(&sentence);
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut settings.auto_check, "Check for new apps and updates every");
-                    ui.add_enabled(settings.auto_check, egui::DragValue::new(&mut settings.check_hours).range(1..=MAX_CHECK_HOURS).speed(0.2));
-                    ui.label(if settings.check_hours == 1 { "hour" } else { "hours" });
+                    if rtl && !after.is_empty() {
+                        ui.label(&after);
+                    }
+                    if rtl {
+                        ui.add_enabled(settings.auto_check, egui::DragValue::new(&mut settings.check_hours).range(1..=MAX_CHECK_HOURS).speed(0.2));
+                    }
+                    ui.checkbox(&mut settings.auto_check, &before);
+                    if !rtl {
+                        ui.add_enabled(settings.auto_check, egui::DragValue::new(&mut settings.check_hours).range(1..=MAX_CHECK_HOURS).speed(0.2));
+                    }
+                    if !rtl && !after.is_empty() {
+                        ui.label(&after);
+                    }
                 });
-                ui.label(RichText::new("And at start-up. Check for updates in the sidebar checks right away.").small().color(p.subtle));
+                note(ui, p, "settings.auto_check_note");
                 ui.add_space(14.0);
 
                 #[cfg(tray)]
                 {
-                    // What the system calls the tray, and signing in.
-                    let (tray, sign_in) = if cfg!(target_os = "macos") { ("menu bar", "log in") } else { ("tray", "sign in to Windows") };
-                    ui.label(RichText::new("In the background").family(theme::strong()));
+                    // What the system calls the tray (the menu bar on macOS), and signing in.
+                    let mac = if cfg!(target_os = "macos") { "_macos" } else { "" };
+                    heading(ui, "settings.background");
                     let mut on = self.start_on_logon;
-                    if ui.checkbox(&mut on, "Start on logon").changed() {
+                    if ui.checkbox(&mut on, t("settings.start_on_logon")).changed() {
                         match system::set_start_on_logon(on) {
                             Ok(()) => self.start_on_logon = on,
-                            Err(e) => self.flash(format!("Couldn't change that: {e}")),
+                            Err(e) => self.flash(tf("flash.change_failed", &[("error", &e)])),
                         }
                     }
-                    ui.label(RichText::new(format!("Opens in the {tray} when you {sign_in}, and checks for updates from there.")).small().color(p.subtle));
-                    ui.add_enabled(self.tray.is_some(), egui::Checkbox::new(&mut self.state.settings.close_to_tray, format!("Minimize to {tray} on close")));
-                    ui.label(RichText::new(format!("Closing the window keeps CraftCraft in the {tray}. Quit from its icon's menu.")).small().color(p.subtle));
+                    note(ui, p, &format!("settings.start_on_logon_note{mac}"));
+                    ui.add_enabled(self.tray.is_some(), egui::Checkbox::new(&mut self.state.settings.close_to_tray, t(&format!("settings.close_to_tray{mac}"))));
+                    note(ui, p, &format!("settings.close_to_tray_note{mac}"));
                     ui.add_space(14.0);
                 }
 
-                ui.label(RichText::new("Command-line apps").family(theme::strong()));
-                ui.label(
-                    RichText::new(
-                        "When you install a terminal or command-line app (ripgrep, uv…), CraftCraft puts a launcher for each of its commands in this folder:",
-                    )
-                    .small()
-                    .color(p.muted),
-                );
+                heading(ui, "settings.cli");
+                para(ui, &i18n::text("settings.cli_note", &[]), |t| t.small().color(p.muted));
                 ui.horizontal(|ui| {
                     ui.monospace(self.paths.bin().display().to_string());
-                    if ui.small_button("Show").clicked() {
+                    if ui.small_button(t("settings.show")).clicked() {
                         system::reveal(&self.paths.bin());
                     }
                 });
                 let commands = system::commands(&self.paths);
                 let has = if commands.is_empty() {
-                    "Empty for now: no command-line apps installed yet.".to_string()
+                    i18n::text("settings.cli_empty", &[])
                 } else {
-                    format!("Commands: {}", commands.join(", "))
+                    i18n::text("settings.cli_commands", &[("commands", &commands.join(", "))])
                 };
-                ui.label(RichText::new(has).small().color(p.subtle));
+                para(ui, &has, |t| t.small().color(p.subtle));
                 if system::bin_on_path(&self.paths) {
-                    ui.label(RichText::new("✔ It's on your PATH, so the commands work in any terminal.").small().color(p.good));
+                    para(ui, &i18n::text("settings.cli_on_path", &[]), |t| t.small().color(p.good));
                 } else {
                     #[cfg(windows)]
-                    if ui.button("Add it to my PATH").clicked() {
+                    if ui.button(t("settings.cli_add_path")).clicked() {
                         match system::add_bin_to_path(&self.paths) {
-                            Ok(()) => self.flash("Added to PATH. New terminals will find the commands.".into()),
-                            Err(e) => self.flash(format!("Couldn't change PATH: {e}")),
+                            Ok(()) => self.flash(t("flash.path_added")),
+                            Err(e) => self.flash(tf("flash.path_failed", &[("error", &e)])),
                         }
                     }
                     #[cfg(not(windows))]
                     {
-                        ui.label(RichText::new("To use the commands in any terminal, add this to your shell profile:").small().color(p.muted));
+                        para(ui, &i18n::text("settings.cli_profile", &[]), |t| t.small().color(p.muted));
                         let mut line = system::path_line(&self.paths);
                         ui.add(egui::TextEdit::singleline(&mut line).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
                     }
                 }
                 ui.add_space(14.0);
 
-                ui.label(RichText::new("Data folder").family(theme::strong()));
+                heading(ui, "settings.data");
                 ui.horizontal(|ui| {
                     ui.monospace(self.paths.root.display().to_string());
-                    if ui.small_button("Show").clicked() {
+                    if ui.small_button(t("settings.show")).clicked() {
                         system::reveal(&self.paths.root);
                     }
                 });
-                ui.label(
-                    RichText::new("Apps are downloaded only when you install or update them, and their installers are cleaned up afterwards.")
-                        .small()
-                        .color(p.subtle),
-                );
+                note(ui, p, "settings.data_note");
                 ui.add_space(14.0);
 
                 if telemetry::available() || telemetry::opted_out_by_environment() {
-                    ui.label(RichText::new("Privacy").family(theme::strong()));
+                    heading(ui, "settings.privacy");
                     let blocked = telemetry::opted_out_by_environment();
                     let mut on = self.state.settings.share_usage && !blocked;
-                    if ui.add_enabled(!blocked, egui::Checkbox::new(&mut on, "Share anonymous usage statistics")).changed() {
+                    if ui.add_enabled(!blocked, egui::Checkbox::new(&mut on, t("settings.share_usage"))).changed() {
                         self.set_share_usage(on);
                     }
-                    let note = if blocked {
-                        "Off on this computer: DO_NOT_TRACK or CRAFTCRAFT_NO_TELEMETRY is set, so CraftCraft sends no statistics at all."
-                    } else {
-                        "Launches, and which apps you install, update, open and remove, with your CraftCraft version, operating system and processor type, under a random id. Never your name, files or IP address."
-                    };
-                    ui.label(RichText::new(note).small().color(p.subtle));
-                    if ui.link("Privacy statement").clicked() {
+                    note(ui, p, if blocked { "settings.usage_blocked" } else { "settings.usage_note" });
+                    if ui.link(t("settings.privacy_statement")).clicked() {
                         system::open_url(PRIVACY_STATEMENT);
                     }
                     ui.add_space(14.0);
                 }
 
-                ui.label(RichText::new("Troubleshooting").family(theme::strong()));
-                if ui.checkbox(&mut self.state.settings.debug, "Debug mode").changed() {
+                heading(ui, "settings.troubleshooting");
+                if ui.checkbox(&mut self.state.settings.debug, t("settings.debug")).changed() {
                     debug::set(self.state.settings.debug);
                 }
-                ui.label(
-                    RichText::new("Logs what CraftCraft does to craftcraft.log, and keeps downloaded installers and their logs instead of deleting them.")
-                        .small()
-                        .color(p.subtle),
-                );
+                note(ui, p, "settings.debug_note");
                 ui.horizontal(|ui| {
                     ui.monospace(self.paths.logs().display().to_string());
-                    if ui.small_button("Show").clicked() {
+                    if ui.small_button(t("settings.show")).clicked() {
                         system::reveal(&self.paths.logs());
                     }
                 });
@@ -1326,8 +1404,64 @@ impl Launcher {
 
 fn section_label(ui: &mut egui::Ui, p: Palette, text: &str) {
     ui.add_space(2.0);
-    ui.label(RichText::new(text.to_uppercase()).font(FontId::monospace(10.5)).color(p.subtle).extra_letter_spacing(1.2));
+    // Spacing letters out would pull apart joined scripts (Arabic, Hindi, Bengali).
+    let spacing = if i18n::current().latin() { 1.2 } else { 0.0 };
+    ui.label(RichText::new(text.to_uppercase()).font(FontId::monospace(10.5)).color(p.subtle).extra_letter_spacing(spacing));
     ui.add_space(2.0);
+}
+
+/// A heading in Settings.
+fn heading(ui: &mut egui::Ui, key: &str) {
+    ui.label(RichText::new(t(key)).family(theme::strong()));
+}
+
+/// The small print under a setting.
+fn note(ui: &mut egui::Ui, p: Palette, key: &str) {
+    para(ui, &i18n::text(key, &[]), |t| t.small().color(p.subtle));
+}
+
+/// Text that may wrap, as written (not in visual order). egui wraps lines left to right, so
+/// right-to-left text is broken into lines here, each put in visual order against the right edge.
+fn para(ui: &mut egui::Ui, text: &str, style: impl Fn(RichText) -> RichText) {
+    if !i18n::is_rtl(text) {
+        ui.label(style(RichText::new(text)));
+        return;
+    }
+    let width = ui.available_width();
+    let galley = |ui: &egui::Ui, line: &str| {
+        egui::WidgetText::from(style(RichText::new(i18n::display(line)))).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body)
+    };
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        for word in paragraph.split(' ') {
+            let longer = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+            if !line.is_empty() && galley(ui, &longer).size().x > width {
+                lines.push(std::mem::replace(&mut line, word.to_string()));
+            } else {
+                line = longer;
+            }
+        }
+        lines.push(line);
+    }
+    // Painted rather than laid out right to left, which would widen an auto-sized window.
+    let color = ui.visuals().text_color();
+    let spacing = std::mem::replace(&mut ui.spacing_mut().item_spacing.y, 0.0);
+    for line in lines {
+        let galley = galley(ui, &line);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, galley.size().y), Sense::hover());
+        ui.painter().galley(rect.right_top() - Vec2::new(galley.size().x, 0.0), galley, color);
+    }
+    ui.spacing_mut().item_spacing.y = spacing;
+}
+
+/// Hover text, as written (see [`para`]).
+fn hover(response: egui::Response, text: &str) -> egui::Response {
+    if i18n::is_rtl(text) {
+        response.on_hover_ui(|ui| para(ui, text, |t| t))
+    } else {
+        response.on_hover_text(text)
+    }
 }
 
 /// A sidebar row; returns whether it was clicked.
@@ -1357,14 +1491,30 @@ fn nav_item(ui: &mut egui::Ui, p: Palette, label: &str, count: usize, selected: 
     response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
-/// All of a failure, for its hover text and Copy error.
+/// What failed and why, as written: "Installer failed: …". The why comes from the system or the
+/// launcher's internals, in English.
+fn failure_text(failure: &Failure) -> String {
+    let step = match failure.step {
+        Step::Find => "step.find",
+        Step::Download => "step.download",
+        Step::Checksum => "step.checksum",
+        Step::Unpack => "step.unpack",
+        Step::Setup => "step.setup",
+        Step::Installer => "step.installer",
+        Step::Open => "step.open",
+        Step::Uninstall => "step.uninstall",
+    };
+    i18n::text("failure", &[("step", &i18n::text(step, &[])), ("message", &failure.message)])
+}
+
+/// All of a failure, as written, for its hover text and Copy error.
 fn failure_details(failure: &Failure) -> String {
-    let mut text = failure.to_string();
+    let mut text = failure_text(failure);
     if let Some(log) = &failure.log {
-        text.push_str(&format!("\n\nWindows Installer's log: {} (⋯ → Installer log)", log.display()));
+        text.push_str(&format!("\n\n{}", i18n::text("failure.installer_log", &[("path", &log.display())])));
     }
     if !debug::enabled() {
-        text.push_str("\n\nDebug mode, in Settings, logs more.");
+        text.push_str(&format!("\n\n{}", i18n::text("failure.debug_hint", &[])));
     }
     text
 }
@@ -1391,7 +1541,7 @@ fn spinner_label(ui: &mut egui::Ui, p: Palette, text: &str) {
 }
 
 /// A full-width notice with an icon, text and buttons (rightmost first); returns which was clicked.
-fn banner(ui: &mut egui::Ui, p: Palette, color: Color32, glyph: &str, title: &str, body: Option<&str>, buttons: &[&str]) -> Option<usize> {
+fn banner(ui: &mut egui::Ui, p: Palette, color: Color32, glyph: &str, title: &str, body: Option<&str>, buttons: &[String]) -> Option<usize> {
     let mut clicked = None;
     Frame::new()
         .fill(p.surface)
@@ -1408,12 +1558,12 @@ fn banner(ui: &mut egui::Ui, p: Palette, color: Color32, glyph: &str, title: &st
                 ui.vertical(|ui| {
                     ui.label(RichText::new(title).family(theme::strong()).color(p.ink));
                     if let Some(body) = body {
-                        ui.label(RichText::new(body).color(p.muted));
+                        para(ui, body, |t| t.color(p.muted));
                     }
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     for (i, button) in buttons.iter().enumerate() {
-                        if ui.button(*button).clicked() {
+                        if ui.button(button).clicked() {
                             clicked = Some(i);
                         }
                     }
@@ -1432,7 +1582,7 @@ fn stars_badge(ui: &mut egui::Ui, p: Palette, top_right: egui::Pos2, stars: u64)
     let rect = egui::Rect::from_min_max(egui::pos2(center.x - 8.0, text_pos.y), egui::pos2(top_right.x, text_pos.y + galley.size().y));
     ui.painter().add(star(center, 5.6, Color32::from_rgb(0xe3, 0xb3, 0x41)));
     ui.painter().galley(text_pos, galley, p.muted);
-    ui.interact(rect, ui.scope_id().with(("stars", top_right.x as i32, top_right.y as i32)), Sense::hover()).on_hover_text(format!("{stars} stars on GitHub"));
+    ui.interact(rect, ui.scope_id().with(("stars", top_right.x as i32, top_right.y as i32)), Sense::hover()).on_hover_text(tn("card.stars", stars, &[]));
 }
 
 /// A filled five-pointed star: a fan of triangles from its centre.
@@ -1477,18 +1627,21 @@ fn logo(ui: &mut egui::Ui, size: f32) {
     painter.rect_filled(front, CornerRadius::same((2.5 * u) as u8), Color32::WHITE);
 }
 
+/// As written, to go in a sentence.
 fn ago(secs: i64) -> String {
+    let n = |unit: i64| (secs / unit).to_string();
     match secs {
-        ..60 => "just now".into(),
-        60..3600 => format!("{} min ago", secs / 60),
-        3600..86_400 => format!("{} h ago", secs / 3600),
-        _ => format!("{} days ago", secs / 86_400),
+        ..60 => i18n::text("time.just_now", &[]),
+        60..3600 => i18n::text("time.minutes_ago", &[("n", &n(60))]),
+        3600..86_400 => i18n::text("time.hours_ago", &[("n", &n(3600))]),
+        _ => i18n::plural_text("time.days_ago", (secs / 86_400) as u64, &[]),
     }
 }
 
+/// As written, to go in a sentence.
 fn minutes(secs: i64) -> String {
-    let m = (secs.max(0) + 59) / 60;
-    if m <= 1 { "a minute".into() } else { format!("{m} minutes") }
+    let m = ((secs.max(0) + 59) / 60).max(1);
+    i18n::plural_text("time.minutes", m as u64, &[])
 }
 
 #[cfg(test)]
