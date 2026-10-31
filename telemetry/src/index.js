@@ -42,7 +42,7 @@ export default {
 };
 
 async function proxy(request, pathname, env, ctx) {
-  const headers = new Headers({ "User-Agent": "craftcraft-telemetry" });
+  const headers = new Headers({ "User-Agent": "craft-telemetry" });
   const etag = request.headers.get("If-None-Match");
   if (etag) headers.set("If-None-Match", etag);
   const res = await fetch(ORIGIN + pathname, { headers, cf: { cacheTtl: 300 } });
@@ -102,7 +102,7 @@ function count(env, kind, { launcher, os, arch, os_version, country }) {
 }
 
 async function daily(env) {
-  const headers = { Accept: "application/vnd.github+json", "User-Agent": "craftcraft-telemetry" };
+  const headers = { Accept: "application/vnd.github+json", "User-Agent": "craft-telemetry" };
   if (env.GITHUB_TOKEN) headers.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
   const day = today();
   const rows = [];

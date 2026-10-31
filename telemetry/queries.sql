@@ -1,5 +1,5 @@
 -- Useful questions. Run one with:
---   npx wrangler d1 execute craftcraft-telemetry --remote --command "<query>"
+--   npx wrangler d1 execute craft-telemetry --remote --command "<query>"
 
 -- Launcher downloads by version and file (latest snapshot).
 SELECT tag, asset, downloads FROM downloads WHERE day = (SELECT max(day) FROM downloads) ORDER BY tag DESC, downloads DESC;

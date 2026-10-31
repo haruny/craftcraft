@@ -1,5 +1,5 @@
 -- The usage statistics database (Cloudflare D1). Apply with:
---   npx wrangler d1 execute craftcraft-telemetry --remote --file schema.sql
+--   npx wrangler d1 execute craft-telemetry --remote --file schema.sql
 
 -- Daily counters with no ids: catalog checks (kind catalog_check), and the website's page views and
 -- Download clicks (site_view, site_download_click; launcher, arch and os_version are empty).

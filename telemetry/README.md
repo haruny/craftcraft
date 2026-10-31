@@ -35,9 +35,9 @@ commands, limits and turning it off. The short version:
 ```sh
 cd telemetry
 npx wrangler login
-npx wrangler d1 create craftcraft-telemetry      # paste the database_id into wrangler.toml
-npx wrangler d1 execute craftcraft-telemetry --remote --file schema.sql
-npx wrangler deploy                              # prints https://craftcraft-telemetry.<you>.workers.dev
+npx wrangler d1 create craft-telemetry      # paste the database_id into wrangler.toml
+npx wrangler d1 execute craft-telemetry --remote --file schema.sql
+npx wrangler deploy                              # prints https://craft-telemetry.<you>.workers.dev
 # Optional: a token, for GitHub's higher API limit in the daily snapshot
 npx wrangler secret put GITHUB_TOKEN
 ```
@@ -45,11 +45,11 @@ npx wrangler secret put GITHUB_TOKEN
 Check that it passes the catalog on, then switch the launcher and the site over:
 
 ```sh
-curl -sA "CraftCraft/0.0.0 (test; test; test; +x)" https://craftcraft-telemetry.<you>.workers.dev/catalog.json | head -c 200
+curl -sA "CraftCraft/0.0.0 (test; test; test; +x)" https://craft-telemetry.<you>.workers.dev/catalog.json | head -c 200
 ```
 
 1. **Launcher:** in the GitHub repository's Settings > Secrets and variables > Actions > Variables,
-   add `CRAFTCRAFT_TELEMETRY` = `https://craftcraft-telemetry.<you>.workers.dev`. The release
+   add `CRAFTCRAFT_TELEMETRY` = `https://craft-telemetry.<you>.workers.dev`. The release
    workflow builds it in. Builds without it (such as from source) send nothing and fetch the catalog
    from GitHub Pages as before.
 2. **Website:** set `TELEMETRY` at the top of the site's `app.js` to the same address.
@@ -61,7 +61,7 @@ accept an endpoint on this machine; `CRAFTCRAFT_HOME` keeps your own launcher's 
 ## Read it
 
 ```sh
-npx wrangler d1 execute craftcraft-telemetry --remote --command "SELECT os, arch, sum(n) FROM counts WHERE kind = 'catalog_check' GROUP BY os, arch"
+npx wrangler d1 execute craft-telemetry --remote --command "SELECT os, arch, sum(n) FROM counts WHERE kind = 'catalog_check' GROUP BY os, arch"
 ```
 
 [queries.sql](queries.sql) has more: downloads per platform, versions in use, active installations,
@@ -87,10 +87,10 @@ with fewer than 5 installations is left out, and so is a user total under 5.
 Replace `<you>` with your workers.dev subdomain and paste these into the README:
 
 ```md
-[![Monthly users](https://img.shields.io/endpoint?url=https%3A%2F%2Fcraftcraft-telemetry.<you>.workers.dev%2Fbadge%2Fusers)](Privacy_Statement.md)
-[![Runs on](https://img.shields.io/endpoint?url=https%3A%2F%2Fcraftcraft-telemetry.<you>.workers.dev%2Fbadge%2Fplatforms)](Privacy_Statement.md)
-[![App installs](https://img.shields.io/endpoint?url=https%3A%2F%2Fcraftcraft-telemetry.<you>.workers.dev%2Fbadge%2Fapp-installs)](Privacy_Statement.md)
-[![Most used](https://img.shields.io/endpoint?url=https%3A%2F%2Fcraftcraft-telemetry.<you>.workers.dev%2Fbadge%2Ftop-app)](Privacy_Statement.md)
+[![Monthly users](https://img.shields.io/endpoint?url=https%3A%2F%2Fcraft-telemetry.<you>.workers.dev%2Fbadge%2Fusers)](Privacy_Statement.md)
+[![Runs on](https://img.shields.io/endpoint?url=https%3A%2F%2Fcraft-telemetry.<you>.workers.dev%2Fbadge%2Fplatforms)](Privacy_Statement.md)
+[![App installs](https://img.shields.io/endpoint?url=https%3A%2F%2Fcraft-telemetry.<you>.workers.dev%2Fbadge%2Fapp-installs)](Privacy_Statement.md)
+[![Most used](https://img.shields.io/endpoint?url=https%3A%2F%2Fcraft-telemetry.<you>.workers.dev%2Fbadge%2Ftop-app)](Privacy_Statement.md)
 ```
 
 There's also `/badge/downloads`, though shields.io's own
@@ -104,5 +104,5 @@ Someone who wants their usage statistics deleted can send the id from `usage.id`
 `state.json` (in the data folder, Settings > Data folder > Show):
 
 ```sh
-npx wrangler d1 execute craftcraft-telemetry --remote --command "DELETE FROM events WHERE install_id = '<id>'"
+npx wrangler d1 execute craft-telemetry --remote --command "DELETE FROM events WHERE install_id = '<id>'"
 ```

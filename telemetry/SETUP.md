@@ -38,7 +38,7 @@ confirms which account you're signed in to.
 ## 2. Create the database
 
 ```sh
-npx wrangler d1 create craftcraft-telemetry
+npx wrangler d1 create craft-telemetry
 ```
 
 It prints a block like this:
@@ -46,7 +46,7 @@ It prints a block like this:
 ```toml
 [[d1_databases]]
 binding = "DB"
-database_name = "craftcraft-telemetry"
+database_name = "craft-telemetry"
 database_id = "1f2e3d4c-...."
 ```
 
@@ -56,7 +56,7 @@ Copy the `database_id` value into [wrangler.toml](wrangler.toml), replacing
 Then create the tables:
 
 ```sh
-npx wrangler d1 execute craftcraft-telemetry --remote --file schema.sql
+npx wrangler d1 execute craft-telemetry --remote --file schema.sql
 ```
 
 Running it again later is safe: it only adds tables that are missing. Run it again whenever
@@ -72,7 +72,7 @@ The first time, Wrangler asks you to pick a `workers.dev` subdomain for your acc
 `haruny`). The deploy ends by printing the Worker's address:
 
 ```
-https://craftcraft-telemetry.haruny.workers.dev
+https://craft-telemetry.haruny.workers.dev
 ```
 
 This guide calls that **the Worker address**. Run `npx wrangler deploy` again whenever
@@ -92,7 +92,7 @@ npx wrangler secret put GITHUB_TOKEN     # paste the token when asked
 ### Optional: your own domain
 
 If you have a domain on Cloudflare, you can serve the Worker from it, for example
-`stats.example.com`: in the dashboard, open **Workers & Pages > craftcraft-telemetry > Settings >
+`stats.example.com`: in the dashboard, open **Workers & Pages > craft-telemetry > Settings >
 Domains & Routes > Add > Custom domain**. Use that address everywhere this guide says "the Worker
 address". Once launchers are using an address, keep it working: they have it built in.
 
@@ -117,8 +117,8 @@ curl -s <worker>/badge/users; echo
 Look at what arrived, then delete the test rows:
 
 ```sh
-npx wrangler d1 execute craftcraft-telemetry --remote --command "SELECT * FROM counts; SELECT * FROM events"
-npx wrangler d1 execute craftcraft-telemetry --remote --command "DELETE FROM counts WHERE os = 'test'; DELETE FROM events WHERE os = 'test'; DELETE FROM published"
+npx wrangler d1 execute craft-telemetry --remote --command "SELECT * FROM counts; SELECT * FROM events"
+npx wrangler d1 execute craft-telemetry --remote --command "DELETE FROM counts WHERE os = 'test'; DELETE FROM events WHERE os = 'test'; DELETE FROM published"
 ```
 
 `npx wrangler tail` streams the Worker's live logs and errors, if something doesn't look right.
@@ -129,7 +129,7 @@ The release workflow builds the Worker address into the launcher from a reposito
 with the GitHub CLI:
 
 ```sh
-gh variable set CRAFTCRAFT_TELEMETRY --repo haruny/craftcraft --body "https://craftcraft-telemetry.haruny.workers.dev"
+gh variable set CRAFTCRAFT_TELEMETRY --repo haruny/craftcraft --body "https://craft-telemetry.haruny.workers.dev"
 ```
 
 Or in the browser: **Settings > Secrets and variables > Actions > Variables > New repository
@@ -151,7 +151,7 @@ Serve the Worker on this machine, with a local database, on port 8787:
 
 ```sh
 cd telemetry
-npx wrangler d1 execute craftcraft-telemetry --local --file schema.sql   # once
+npx wrangler d1 execute craft-telemetry --local --file schema.sql   # once
 npx wrangler dev
 ```
 
@@ -171,7 +171,7 @@ In the craftcraft-site repository, set `TELEMETRY` at the top of `app.js` to the
 publish the site:
 
 ```js
-const TELEMETRY = "https://craftcraft-telemetry.haruny.workers.dev";
+const TELEMETRY = "https://craft-telemetry.haruny.workers.dev";
 ```
 
 From then on, each page view and each click on Download is counted by day, visitor OS and country.
@@ -191,16 +191,16 @@ Run each of these from `telemetry/`.
 
 | To | Run |
 |---|---|
-| Ask a question of the data | `npx wrangler d1 execute craftcraft-telemetry --remote --command "<SQL>"` (examples in [queries.sql](queries.sql)), or the D1 console in the dashboard |
+| Ask a question of the data | `npx wrangler d1 execute craft-telemetry --remote --command "<SQL>"` (examples in [queries.sql](queries.sql)), or the D1 console in the dashboard |
 | See live requests and errors | `npx wrangler tail` |
-| Recompute the badges now | `npx wrangler d1 execute craftcraft-telemetry --remote --command "DELETE FROM published"` (the next request rebuilds them) |
+| Recompute the badges now | `npx wrangler d1 execute craft-telemetry --remote --command "DELETE FROM published"` (the next request rebuilds them) |
 | Ship a Worker change | `npx wrangler deploy` |
-| Apply a schema change | `npx wrangler d1 execute craftcraft-telemetry --remote --file schema.sql` |
-| Back up the database | `npx wrangler d1 export craftcraft-telemetry --remote --output backup.sql` |
+| Apply a schema change | `npx wrangler d1 execute craft-telemetry --remote --file schema.sql` |
+| Back up the database | `npx wrangler d1 export craft-telemetry --remote --output backup.sql` |
 | Delete someone's usage statistics | see [README.md](README.md#answering-a-deletion-request) |
 
 The daily job runs at 05:30 UTC (`crons` in `wrangler.toml`). The dashboard's **Workers & Pages >
-craftcraft-telemetry > Settings > Trigger events** shows its past runs.
+craft-telemetry > Settings > Trigger events** shows its past runs.
 
 ## Limits and costs
 
@@ -220,7 +220,7 @@ GitHub Pages for the catalog, so nobody loses updates, and only the statistics s
 - **Stop counting website visits:** set `TELEMETRY` back to `""` in the site's `app.js`.
 - **Stop everything now:** `npx wrangler delete` removes the Worker. Launchers that have it built in
   fall back to GitHub Pages for the catalog, and their events fail quietly.
-- **Delete the data:** `npx wrangler d1 delete craftcraft-telemetry`. This can't be undone, so
+- **Delete the data:** `npx wrangler d1 delete craft-telemetry`. This can't be undone, so
   export a backup first if you might want it.
 
 If you stop collecting, update [Privacy_Statement.md](../Privacy_Statement.md) to match.
