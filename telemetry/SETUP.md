@@ -50,8 +50,16 @@ database_name = "craft-telemetry"
 database_id = "1f2e3d4c-...."
 ```
 
-Copy the `database_id` value into [wrangler.toml](wrangler.toml), replacing
-`REPLACE_WITH_DATABASE_ID`. The ID isn't a secret, so you can commit it.
+Make your own copy of the Worker's configuration from the example, and put the `database_id` value
+in it, replacing `REPLACE_WITH_DATABASE_ID`:
+
+```sh
+cp wrangler.toml.example wrangler.toml       # PowerShell: Copy-Item wrangler.toml.example wrangler.toml
+```
+
+`wrangler.toml` is in `.gitignore`, so your database ID stays on your computer. The repository keeps
+only [wrangler.toml.example](wrangler.toml.example), which has no IDs. If you change a setting other
+than the ID, such as the daily schedule, change the example too.
 
 Then create the tables:
 

@@ -8,7 +8,7 @@ SETUP.md         setting it up, step by step
 src/index.js     the Worker
 schema.sql       the database's tables
 queries.sql      questions worth asking it
-wrangler.toml
+wrangler.toml.example   the Worker's configuration, without IDs: copy it to wrangler.toml (ignored by git)
 ```
 
 It does four things:
@@ -35,6 +35,7 @@ commands, limits and turning it off. The short version:
 ```sh
 cd telemetry
 npx wrangler login
+cp wrangler.toml.example wrangler.toml
 npx wrangler d1 create craft-telemetry      # paste the database_id into wrangler.toml
 npx wrangler d1 execute craft-telemetry --remote --file schema.sql
 npx wrangler deploy                              # prints https://craft-telemetry.<you>.workers.dev
