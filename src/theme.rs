@@ -146,7 +146,9 @@ pub fn set_fonts(ctx: &egui::Context, langs: &[Lang]) -> Vec<Lang> {
         }
     }
     let fallbacks = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    let family = |first: &str, rest: &[String]| -> Vec<String> { std::iter::once(first.to_string()).chain(system.iter().cloned()).chain(rest.iter().cloned()).collect() };
+    let family = |first: &str, rest: &[String]| -> Vec<String> {
+        std::iter::once(first.to_string()).chain(system.iter().cloned()).chain(rest.iter().cloned()).collect()
+    };
     let monospace = fonts.families.get(&FontFamily::Monospace).cloned().unwrap_or_default();
     fonts.families.insert(FontFamily::Proportional, family("geist", &fallbacks));
     fonts.families.insert(FontFamily::Monospace, family("geist-mono", &monospace));

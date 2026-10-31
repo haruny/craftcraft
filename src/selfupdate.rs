@@ -262,7 +262,12 @@ fn replace(staged: &Path, target: &Path) -> Result<(), String> {
     if fs::rename(staged, &new).is_err() {
         let copied = if staged.is_dir() {
             // ditto keeps a bundle's symlinks and signature intact.
-            Command::new("ditto").arg(staged).arg(&new).status().map_err(|e| e.to_string()).and_then(|s| if s.success() { Ok(()) } else { Err(format!("ditto: {s}")) })
+            Command::new("ditto")
+                .arg(staged)
+                .arg(&new)
+                .status()
+                .map_err(|e| e.to_string())
+                .and_then(|s| if s.success() { Ok(()) } else { Err(format!("ditto: {s}")) })
         } else {
             fs::copy(staged, &new).map(drop).map_err(|e| e.to_string())
         };
@@ -304,7 +309,8 @@ fn start(target: &Path, args: &[&str]) -> Result<(), String> {
 fn set_listed_version(target: &Path, version: &str) {
     use winreg::RegKey;
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
-    let Ok(key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\CraftCraft", KEY_READ | KEY_WRITE)
+    let Ok(key) =
+        RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\CraftCraft", KEY_READ | KEY_WRITE)
     else {
         return;
     };
@@ -349,7 +355,8 @@ fn run_msi(msi: &Path, paths: &Paths, for_everyone: bool, args: &[&str]) -> Resu
 /// says how it went: `Ok` with this version, or `Err` with why the installer failed.
 pub fn finish(paths: &Paths) -> Option<Result<String, String>> {
     if let Ok(exe) = std::env::current_exe() {
-        let target = if cfg!(target_os = "macos") { exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf) } else { Some(exe) };
+        let target =
+            if cfg!(target_os = "macos") { exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf) } else { Some(exe) };
         if let Some(target) = target {
             remove_any(&sibling(&target, ".old"));
             remove_any(&sibling(&target, ".new"));

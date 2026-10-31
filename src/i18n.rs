@@ -245,7 +245,11 @@ fn visual(line: &str) -> String {
     }
     // A separator between digits ("1.5", "5,000") is part of the number.
     for i in 1..pieces.len().saturating_sub(1) {
-        if pieces[i].1 == Class::Neutral && matches!(pieces[i].0.as_str(), "." | "," | ":" | "/") && pieces[i - 1].1 == Class::Number && pieces[i + 1].1 == Class::Number {
+        if pieces[i].1 == Class::Neutral
+            && matches!(pieces[i].0.as_str(), "." | "," | ":" | "/")
+            && pieces[i - 1].1 == Class::Number
+            && pieces[i + 1].1 == Class::Number
+        {
             pieces[i].1 = Class::Number;
         }
     }

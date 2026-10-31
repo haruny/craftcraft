@@ -67,7 +67,11 @@ fn candidates(lang: Lang) -> &'static [Candidate] {
             ("/System/Library/Fonts/STHeiti Light.ttc", 0),
             ("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 0),
         ],
-        Lang::Hi => &[("/System/Library/Fonts/Kohinoor.ttc", 0), ("/System/Library/Fonts/Supplemental/DevanagariMT.ttc", 0), ("/System/Library/Fonts/Supplemental/ITFDevanagari.ttc", 0)],
+        Lang::Hi => &[
+            ("/System/Library/Fonts/Kohinoor.ttc", 0),
+            ("/System/Library/Fonts/Supplemental/DevanagariMT.ttc", 0),
+            ("/System/Library/Fonts/Supplemental/ITFDevanagari.ttc", 0),
+        ],
         Lang::Bn => &[
             ("/System/Library/Fonts/KohinoorBangla.ttc", 0),
             ("/System/Library/Fonts/Supplemental/Bangla Sangam MN.ttc", 0),
@@ -102,7 +106,12 @@ fn candidates(lang: Lang) -> &'static [Candidate] {
             ("wqy-zenhei.ttc", 0),
             ("DroidSansFallbackFull.ttf", 0),
         ],
-        Lang::Hi => &[("NotoSansDevanagari-Regular.ttf", 0), ("NotoSansDevanagari-Regular.otf", 0), ("NotoSansDevanagariUI-Regular.ttf", 0), ("Lohit-Devanagari.ttf", 0)],
+        Lang::Hi => &[
+            ("NotoSansDevanagari-Regular.ttf", 0),
+            ("NotoSansDevanagari-Regular.otf", 0),
+            ("NotoSansDevanagariUI-Regular.ttf", 0),
+            ("Lohit-Devanagari.ttf", 0),
+        ],
         Lang::Bn => &[("NotoSansBengali-Regular.ttf", 0), ("NotoSansBengali-Regular.otf", 0), ("NotoSansBengaliUI-Regular.ttf", 0), ("Lohit-Bengali.ttf", 0)],
         Lang::Ar => &[
             ("NotoSansArabic-Regular.ttf", 0),
@@ -118,7 +127,12 @@ fn candidates(lang: Lang) -> &'static [Candidate] {
 #[cfg(not(any(windows, target_os = "macos")))]
 fn find(candidates: &[Candidate]) -> Option<(PathBuf, u32)> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let roots = [Some(PathBuf::from("/usr/share/fonts")), Some(PathBuf::from("/usr/local/share/fonts")), home.as_ref().map(|h| h.join(".local/share/fonts")), home.map(|h| h.join(".fonts"))];
+    let roots = [
+        Some(PathBuf::from("/usr/share/fonts")),
+        Some(PathBuf::from("/usr/local/share/fonts")),
+        home.as_ref().map(|h| h.join(".local/share/fonts")),
+        home.map(|h| h.join(".fonts")),
+    ];
     let mut found: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
     for root in roots.into_iter().flatten() {
         walk(&root, 5, &mut |path| {

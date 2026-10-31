@@ -10,6 +10,7 @@ use crate::catalog::{App, Catalog, Kind, Method, Platform};
 use crate::detect::Detected;
 use crate::feed::{self, FeedResult};
 use crate::github::{Lookup, Release};
+use crate::i18n::{self, Lang, t, tf, tn};
 use crate::index::{self, Index};
 use crate::install::{self, Failure, Stage, Step};
 use crate::paths::Paths;
@@ -17,7 +18,6 @@ use crate::selfupdate;
 use crate::state::{Installed, MAX_CHECK_HOURS, Sort, State};
 use crate::theme::{self, Palette};
 use crate::worker::{Event, Worker};
-use crate::i18n::{self, Lang, t, tf, tn};
 use crate::{debug, now, system, telemetry, version};
 
 const SIDEBAR_WIDTH: f32 = 236.0;
@@ -1091,9 +1091,11 @@ impl Launcher {
         };
         let (status_text, status_color, hint) = match (&self.self_update, &offered) {
             (_, None) => (tf("status.installed_current", &[("version", &current)]), p.good, None),
-            (SelfUpdate::Ready(ready), _) => {
-                (tf("banner.launcher_ready", &[("new", &ready.version)]), p.accent, ready.asks_for_approval().then(|| i18n::text("banner.launcher_ready_approval", &[])))
-            }
+            (SelfUpdate::Ready(ready), _) => (
+                tf("banner.launcher_ready", &[("new", &ready.version)]),
+                p.accent,
+                ready.asks_for_approval().then(|| i18n::text("banner.launcher_ready_approval", &[])),
+            ),
             (SelfUpdate::Failed(e), _) => (tf("status.failed", &[("failure", e)]), ui.visuals().error_fg_color, Some(e.clone())),
             (_, Some((new, _))) => (tf("status.update", &[("from", &current), ("to", new)]), p.accent, manual.clone()),
         };
@@ -1228,9 +1230,10 @@ impl Launcher {
                 Busy::Working(Stage::Downloading { done, total }) => {
                     let mb = |b: u64| b as f64 / 1_048_576.0;
                     let (fraction, text) = match total {
-                        Some(total) if *total > 0 => {
-                            (*done as f32 / *total as f32, tf("card.downloaded_of", &[("done", &format!("{:.0}", mb(*done))), ("total", &format!("{:.0}", mb(*total)))]))
-                        }
+                        Some(total) if *total > 0 => (
+                            *done as f32 / *total as f32,
+                            tf("card.downloaded_of", &[("done", &format!("{:.0}", mb(*done))), ("total", &format!("{:.0}", mb(*total)))]),
+                        ),
                         _ => (0.0, tf("card.downloaded", &[("done", &format!("{:.1}", mb(*done)))])),
                     };
                     ui.add(
@@ -1692,7 +1695,12 @@ fn para(ui: &mut egui::Ui, text: &str, style: impl Fn(RichText) -> RichText) {
     }
     let width = ui.available_width();
     let galley = |ui: &egui::Ui, line: &str| {
-        egui::WidgetText::from(style(RichText::new(i18n::display(line)))).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body)
+        egui::WidgetText::from(style(RichText::new(i18n::display(line)))).into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Body,
+        )
     };
     let mut lines = Vec::new();
     for paragraph in text.split('\n') {
@@ -1720,11 +1728,7 @@ fn para(ui: &mut egui::Ui, text: &str, style: impl Fn(RichText) -> RichText) {
 
 /// Hover text, as written (see [`para`]).
 fn hover(response: egui::Response, text: &str) -> egui::Response {
-    if i18n::is_rtl(text) {
-        response.on_hover_ui(|ui| para(ui, text, |t| t))
-    } else {
-        response.on_hover_text(text)
-    }
+    if i18n::is_rtl(text) { response.on_hover_ui(|ui| para(ui, text, |t| t)) } else { response.on_hover_text(text) }
 }
 
 /// A sidebar row; returns whether it was clicked.
