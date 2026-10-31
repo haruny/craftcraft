@@ -1,5 +1,8 @@
 # CraftCraft
 
+[![Downloads](https://img.shields.io/github/downloads/haruny/craftcraft/total?color=e8662e)](https://github.com/haruny/craftcraft/releases)
+[![Latest release](https://img.shields.io/github/v/release/haruny/craftcraft?color=e8662e)](https://github.com/haruny/craftcraft/releases/latest)
+
 **Well-known software, rewritten in Rust: one launcher to install, update and open them.**
 
 PhotoCraft instead of Photoshop, GridCraft instead of Excel, BIMCraft instead of Revit, RustDesk
@@ -243,11 +246,21 @@ started by hand signs too, so you can try it before tagging.
 
 ## Privacy
 
-CraftCraft collects no data about you and has no telemetry. It connects only to fetch the catalog
-and release information from `haruny.github.io` and `api.github.com`, the app icons the catalog
-lists, and the release files you choose to install from `github.com`. Those services see your IP
-address, as for any web request. Turn off automatic update checks in Settings to have it connect
-only when you ask it to.
+The full details are in [Privacy_Statement.md](Privacy_Statement.md). In short:
+
+- **Counts.** Release builds fetch the catalog through CraftCraft's own endpoint, which counts
+  catalog checks per day by launcher version, operating system and version, processor and country.
+  It keeps no IP address or id. This is how we know which computers CraftCraft runs on.
+- **Usage statistics**, which you can turn off. Launches, and which apps you install, update, open
+  and remove, sent under a random id that isn't linked to you or your computer. Nothing is sent
+  until you've seen the notice about it. Turn it off there or in Settings > Privacy.
+- `DO_NOT_TRACK=1` or `CRAFTCRAFT_NO_TELEMETRY=1` turns off both: the catalog then comes
+  straight from GitHub Pages.
+
+A build from source has neither (see [telemetry/README.md](telemetry/README.md)). Otherwise
+CraftCraft connects only to fetch release information from `haruny.github.io` and `api.github.com`,
+the app icons the catalog lists, and the release files you choose to install from `github.com`.
+Those services see your IP address, as for any web request.
 
 ## Layout
 
@@ -255,6 +268,7 @@ only when you ask it to.
 catalog/         catalog.json and featured.json; check.mjs (CI runs it on every change); publish.mjs
                  and releases.mjs, which build what's published (catalog.json, releases.json)
 install/         install.ps1 and install.sh, the one-line installers
+telemetry/       the usage statistics endpoint (a Cloudflare Worker)
 installer/       craftcraft.wxs, the Windows .msi (WiX 3)
 scripts/         dist.ps1 and dist.sh, which build and package a release (dist.sh: the .dmg too);
                  msi.ps1, which packages the .msi

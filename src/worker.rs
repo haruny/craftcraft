@@ -79,12 +79,23 @@ impl Worker {
 
     /// Fetches the release index, then the catalog: by the time the catalog arrives, the launcher
     /// knows which apps' releases it still has to ask GitHub about.
+    /// When `source` is the usage statistics endpoint and it fails, GitHub Pages is asked instead.
     pub fn refresh_catalog(&self, source: String) {
         self.spawn("catalog", move |tx, http, paths, _| {
-            if let Some(i) = index::fetch(http, paths, &index::source(&source)) {
-                _ = tx.send(Event::Index(i));
+            let fetch = |source: &str| {
+                if let Some(i) = index::fetch(http, paths, &index::source(source)) {
+                    _ = tx.send(Event::Index(i));
+                }
+                feed::fetch(http, paths, source)
+            };
+            let mut result = fetch(&source);
+            if let FeedResult::Failed(e) = &result
+                && crate::telemetry::endpoint().is_some_and(|endpoint| source.starts_with(endpoint))
+            {
+                debug::log(format_args!("catalog via {source} failed ({e}); trying {}", feed::FEED));
+                result = fetch(feed::FEED);
             }
-            _ = tx.send(Event::Catalog(feed::fetch(http, paths, &source)));
+            _ = tx.send(Event::Catalog(result));
         });
     }
 

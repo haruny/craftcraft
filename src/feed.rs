@@ -18,14 +18,18 @@ pub enum FeedResult {
 }
 
 /// The catalog to read. Debug builds also honour `$CRAFTCRAFT_FEED` (an address or a local file),
-/// for testing catalog edits before they're published.
+/// for testing catalog edits before they're published. Builds with a usage statistics endpoint
+/// fetch the published catalog through it (see `telemetry`), falling back to [`FEED`].
 pub fn source() -> String {
     if cfg!(debug_assertions)
         && let Some(dev) = std::env::var("CRAFTCRAFT_FEED").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
     {
         return dev;
     }
-    FEED.to_string()
+    match crate::telemetry::endpoint() {
+        Some(endpoint) => format!("{endpoint}/catalog.json"),
+        None => FEED.to_string(),
+    }
 }
 
 /// The last catalog fetched, if any.

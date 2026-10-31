@@ -17,6 +17,7 @@ mod install;
 mod paths;
 mod state;
 mod system;
+mod telemetry;
 mod theme;
 #[cfg(tray)]
 mod tray;

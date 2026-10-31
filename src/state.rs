@@ -1,5 +1,5 @@
 //! What the launcher remembers between runs: what it installed, which catalog apps the user has
-//! already seen (so it can say what's new), dismissed notices, and settings.
+//! already seen (so it can say what's new), dismissed notices, usage statistics, and settings.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -21,7 +21,19 @@ pub struct State {
     pub dismissed_notices: BTreeSet<String>,
     /// Unix seconds of the last successful catalog check.
     pub last_check: i64,
+    pub usage: Usage,
     pub settings: Settings,
+}
+
+/// Usage statistics (see `telemetry`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Usage {
+    /// The user has seen the notice about usage statistics (and answered it).
+    pub asked: bool,
+    /// This installation's random id. Made when the user agrees, and forgotten when they turn
+    /// usage statistics off, so turning them back on starts afresh.
+    pub id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -36,13 +48,15 @@ pub struct Settings {
     pub sort: Sort,
     /// Keep a log, installers and their logs (see `debug`).
     pub debug: bool,
+    /// Send anonymous usage statistics, once the user has been told about them.
+    pub share_usage: bool,
 }
 
 pub const MAX_CHECK_HOURS: u32 = 168;
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { auto_check: true, check_hours: 8, close_to_tray: true, sort: Sort::Featured, debug: false }
+        Self { auto_check: true, check_hours: 8, close_to_tray: true, sort: Sort::Featured, debug: false, share_usage: true }
     }
 }
 

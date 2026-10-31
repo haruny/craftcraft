@@ -7,8 +7,6 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-const USER_AGENT: &str = concat!("CraftCraft/", env!("CARGO_PKG_VERSION"), " (+https://github.com/haruny/craftcraft)");
-
 /// Text responses larger than this are refused.
 const TEXT_LIMIT: u64 = 4 * 1024 * 1024;
 
@@ -34,7 +32,7 @@ impl Http {
     pub fn new() -> Self {
         let agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
-            .user_agent(USER_AGENT)
+            .user_agent(crate::telemetry::user_agent())
             .timeout_connect(Some(Duration::from_secs(15)))
             .timeout_recv_response(Some(Duration::from_secs(30)))
             .timeout_per_read(Some(Duration::from_secs(60)))
@@ -70,6 +68,15 @@ impl Http {
                 Ok(Fetched::RateLimited { reset: header("x-ratelimit-reset").and_then(|r| r.parse().ok()) })
             }
             _ => Err(format!("{url} answered HTTP {status}")),
+        }
+    }
+
+    /// POSTs a small JSON document, expecting any 2xx back.
+    pub fn post_json(&self, url: &str, json: &str) -> Result<(), String> {
+        let resp = self.agent.post(url).header("Content-Type", "application/json").send(json).map_err(|e| e.to_string())?;
+        match resp.status().as_u16() {
+            200..=299 => Ok(()),
+            status => Err(format!("{url} answered HTTP {status}")),
         }
     }
 

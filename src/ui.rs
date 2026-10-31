@@ -16,12 +16,13 @@ use crate::paths::Paths;
 use crate::state::{Installed, MAX_CHECK_HOURS, Sort, State};
 use crate::theme::{self, Palette};
 use crate::worker::{Event, Worker};
-use crate::{debug, now, system, version};
+use crate::{debug, now, system, telemetry, version};
 
 const SIDEBAR_WIDTH: f32 = 236.0;
 const CARD_MIN_WIDTH: f32 = 320.0;
 const CARD_HEIGHT: f32 = 208.0;
 const GAP: f32 = 14.0;
+const PRIVACY_STATEMENT: &str = "https://github.com/haruny/craftcraft/blob/main/Privacy_Statement.md";
 /// After a failed catalog check, wait this long before trying again.
 const RETRY_AFTER: Duration = Duration::from_secs(15 * 60);
 
@@ -169,6 +170,7 @@ impl Launcher {
         launcher.apply_index();
         launcher.fetch_icons();
         launcher.detect();
+        telemetry::record(&launcher.state, "launch", None, None);
         // Always look at start-up: with an ETag an unchanged catalog costs next to nothing.
         if launcher.state.settings.auto_check {
             launcher.check_now();
@@ -389,8 +391,10 @@ impl Launcher {
             }
             Event::Installed { id, result } => {
                 self.busy.remove(&id);
+                let update = self.state.installed.contains_key(&id) || self.detected.contains_key(&id);
                 match result {
                     Ok(installed) => {
+                        telemetry::record(&self.state, if update { "app_update" } else { "app_install" }, Some((&id, &installed.tag)), None);
                         let name = self.app_name(&id);
                         let note = if installed.verified { "" } else { " (unverified: no published checksum)" };
                         self.flash(format!("{name} {} is installed{note}", version::display(&installed.tag)));
@@ -404,6 +408,8 @@ impl Launcher {
                         self.state.save(&self.paths);
                     }
                     Err(e) => {
+                        // Only the step: the message can hold paths with the user's name in them.
+                        telemetry::record(&self.state, "app_install_failed", Some((&id, "")), Some(&format!("{:?}", e.step).to_lowercase()));
                         self.app_errors.insert(id, e);
                     }
                 }
@@ -414,6 +420,7 @@ impl Launcher {
                 self.busy.remove(&id);
                 match result {
                     Ok(()) => {
+                        telemetry::record(&self.state, "app_uninstall", Some((&id, &self.version_of(&id))), None);
                         self.flash(format!("{} was removed", self.app_name(&id)));
                         self.state.installed.remove(&id);
                         self.state.save(&self.paths);
@@ -438,6 +445,28 @@ impl Launcher {
                 self.icons.insert(id, icon);
             }
         }
+    }
+
+    /// The version of an app on this computer, as far as the launcher knows (empty if it doesn't).
+    fn version_of(&self, id: &str) -> String {
+        match (self.state.installed.get(id), self.detected.get(id)) {
+            (Some(i), _) => i.tag.clone(),
+            (None, Some(d)) => d.version.clone().unwrap_or_default(),
+            (None, None) => String::new(),
+        }
+    }
+
+    /// Turns usage statistics on or off. Off forgets this installation's id.
+    fn set_share_usage(&mut self, on: bool) {
+        self.state.usage.asked = true;
+        self.state.settings.share_usage = on;
+        if on && self.state.usage.id.is_none() {
+            self.state.usage.id = Some(telemetry::new_id());
+            telemetry::record(&self.state, "first_run", None, None);
+        } else if !on {
+            self.state.usage.id = None;
+        }
+        self.state.save(&self.paths);
     }
 
     fn app_name(&self, id: &str) -> String {
@@ -792,6 +821,16 @@ impl Launcher {
             }
         }
 
+        if telemetry::available() && !self.state.usage.asked {
+            let body = "Which apps you install and open, with your CraftCraft version and type of computer, under a random id. Never your name, files or IP address. You can turn this off now or in Settings.";
+            match banner(ui, p, p.subtle, "ℹ", "CraftCraft shares anonymous usage statistics", Some(body), &["OK", "Turn off", "Privacy statement"]) {
+                Some(0) => self.set_share_usage(true),
+                Some(1) => self.set_share_usage(false),
+                Some(_) => system::open_url(PRIVACY_STATEMENT),
+                None => {}
+            }
+        }
+
         let new_apps = self.state.new_apps(&catalog);
         if !new_apps.is_empty() {
             let names: Vec<_> = new_apps.iter().filter_map(|id| catalog.app(id)).map(|a| a.name.as_str()).collect();
@@ -1122,6 +1161,7 @@ impl Launcher {
     fn open(&mut self, app: &App, installed: Option<&Installed>, platform: Platform) {
         match system::open_app(app, installed, self.detected.get(&app.id), &self.paths, platform) {
             Ok(()) => {
+                telemetry::record(&self.state, "app_open", Some((&app.id, &self.version_of(&app.id))), None);
                 self.app_errors.remove(&app.id);
             }
             Err(e) => {
@@ -1241,6 +1281,25 @@ impl Launcher {
                         .color(p.subtle),
                 );
                 ui.add_space(14.0);
+
+                if telemetry::available() || telemetry::opted_out_by_environment() {
+                    ui.label(RichText::new("Privacy").family(theme::strong()));
+                    let blocked = telemetry::opted_out_by_environment();
+                    let mut on = self.state.settings.share_usage && !blocked;
+                    if ui.add_enabled(!blocked, egui::Checkbox::new(&mut on, "Share anonymous usage statistics")).changed() {
+                        self.set_share_usage(on);
+                    }
+                    let note = if blocked {
+                        "Off on this computer: DO_NOT_TRACK or CRAFTCRAFT_NO_TELEMETRY is set, so CraftCraft sends no statistics at all."
+                    } else {
+                        "Launches, and which apps you install, update, open and remove, with your CraftCraft version, operating system and processor type, under a random id. Never your name, files or IP address."
+                    };
+                    ui.label(RichText::new(note).small().color(p.subtle));
+                    if ui.link("Privacy statement").clicked() {
+                        system::open_url(PRIVACY_STATEMENT);
+                    }
+                    ui.add_space(14.0);
+                }
 
                 ui.label(RichText::new("Troubleshooting").family(theme::strong()));
                 if ui.checkbox(&mut self.state.settings.debug, "Debug mode").changed() {

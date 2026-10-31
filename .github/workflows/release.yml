@@ -34,6 +34,9 @@ jobs:
     name: build (${{ matrix.target }})
     env:
       MAC_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
+      # The usage statistics endpoint built into the launcher (see telemetry/README.md). Unset, the
+      # builds send no statistics and fetch the catalog straight from GitHub Pages.
+      CRAFTCRAFT_TELEMETRY: ${{ vars.CRAFTCRAFT_TELEMETRY }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
