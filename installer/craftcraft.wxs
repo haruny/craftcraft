@@ -113,11 +113,12 @@
 
     <!-- Opened by double-clicking, the finishing page offers to open CraftCraft, as the script
          does. From the window, not the install, so an install for everyone doesn't start it as
-         administrator. -->
+         administrator. An EXE custom action, not WixShellExec: a DLL one runs in a separate custom
+         action server that never has the foreground, so CraftCraft would open behind the installer.
+         Started by the window that was just clicked, it can come to the front. -->
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Open CraftCraft" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
-    <Property Id="WixShellExecTarget" Value="[#craftcraft.exe]" />
-    <CustomAction Id="Launch" BinaryKey="WixCA" DllEntry="WixShellExec" Impersonate="yes" />
+    <CustomAction Id="Launch" Directory="INSTALLFOLDER" ExeCommand="&quot;[INSTALLFOLDER]craftcraft.exe&quot;" Return="asyncNoWait" Impersonate="yes" />
 
     <!-- WixUI_Minimal, with the choice of who it's for in place of the license page. -->
     <UI Id="CraftCraftUI">
