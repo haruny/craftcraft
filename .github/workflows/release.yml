@@ -315,3 +315,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "CraftCraft ${GITHUB_REF_NAME#v}" --generate-notes
+
+  # Tells running launchers about the release: they update themselves when the catalog's
+  # launcher.version is newer than theirs (see src/selfupdate.rs). A push made with the workflow's
+  # token doesn't start other workflows, so this one asks the Catalog workflow to publish it.
+  announce:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Set the catalog's launcher.version
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          jq --indent 2 --arg v "$version" '.launcher.version = $v' catalog/catalog.json > catalog.json.new
+          mv catalog.json.new catalog/catalog.json
+          if git diff --quiet; then echo "launcher.version is already $version"; exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -am "catalog: launcher $version"
+          git push
+      - name: Publish the catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run catalog.yml --repo "$GITHUB_REPOSITORY" --ref "${{ github.event.repository.default_branch }}"

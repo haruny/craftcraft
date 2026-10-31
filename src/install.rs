@@ -214,7 +214,7 @@ fn single_folder(dir: &Path) -> Option<PathBuf> {
     Some(only.path())
 }
 
-fn extract(archive: &Path, name: &str, dest: &Path) -> Result<(), String> {
+pub(crate) fn extract(archive: &Path, name: &str, dest: &Path) -> Result<(), String> {
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let lower = name.to_ascii_lowercase();
     let open = || File::open(archive).map(BufReader::new).map_err(|e| e.to_string());
@@ -406,7 +406,7 @@ fn run_installer(file: &Path, os: Os, for_everyone: bool, log: &Path) -> Result<
 /// Why Windows Installer failed, from its log: the reason it gives on a `Product: <name> -- <reason>`
 /// line (which also goes to the event log) ahead of the "Installation failed." that follows, or
 /// failing that, an `Error 1925. …` line.
-fn msi_error(log: &str) -> Option<String> {
+pub(crate) fn msi_error(log: &str) -> Option<String> {
     const OUTCOMES: [&str; 4] = ["Installation failed.", "Installation operation failed.", "Removal failed.", "Configuration failed."];
     let product = log
         .lines()
@@ -418,7 +418,7 @@ fn msi_error(log: &str) -> Option<String> {
 }
 
 /// Windows Installer writes its logs in UTF-16.
-fn decode_log(bytes: &[u8]) -> String {
+pub(crate) fn decode_log(bytes: &[u8]) -> String {
     match bytes.strip_prefix(&[0xff, 0xfe]) {
         Some(utf16) => String::from_utf16_lossy(&utf16.as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair)).collect::<Vec<_>>()),
         None => String::from_utf8_lossy(bytes).into_owned(),

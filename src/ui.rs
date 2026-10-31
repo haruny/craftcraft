@@ -13,6 +13,7 @@ use crate::github::{Lookup, Release};
 use crate::index::{self, Index};
 use crate::install::{self, Failure, Stage, Step};
 use crate::paths::Paths;
+use crate::selfupdate;
 use crate::state::{Installed, MAX_CHECK_HOURS, Sort, State};
 use crate::theme::{self, Palette};
 use crate::worker::{Event, Worker};
@@ -109,12 +110,23 @@ pub struct Launcher {
     /// Whether the system starts the launcher at logon, as last read from it.
     #[cfg(tray)]
     start_on_logon: bool,
-    /// The window is hidden in the menu bar.
-    #[cfg(target_os = "macos")]
+    /// The window is hidden in the tray (the menu bar on macOS).
+    #[cfg(tray)]
     hidden: bool,
     /// Whether the app was active last time we looked, while hidden.
     #[cfg(target_os = "macos")]
     was_active: bool,
+    /// How this copy of the launcher updates itself.
+    self_update_how: selfupdate::How,
+    self_update: SelfUpdate,
+}
+
+/// Where the launcher's own update is up to.
+enum SelfUpdate {
+    Idle,
+    Downloading,
+    Ready(selfupdate::Ready),
+    Failed(String),
 }
 
 impl Launcher {
@@ -125,6 +137,7 @@ impl Launcher {
         debug::init(&paths.logs(), state.settings.debug);
         debug::log(format_args!("started, data folder {}", paths.root.display()));
         install::tidy(&paths);
+        let updated = selfupdate::finish(&paths);
         let worker = Worker::new(cc.egui_ctx.clone(), paths.clone());
         let release_index = index::cached(&paths);
         let catalog = feed::cached(&paths);
@@ -168,11 +181,18 @@ impl Launcher {
             quitting: false,
             #[cfg(tray)]
             start_on_logon: system::starts_on_logon(),
-            #[cfg(target_os = "macos")]
+            #[cfg(tray)]
             hidden: false,
             #[cfg(target_os = "macos")]
             was_active: false,
+            self_update_how: selfupdate::how(),
+            self_update: SelfUpdate::Idle,
         };
+        match updated {
+            Some(Ok(version)) => launcher.flash(tf("flash.launcher_updated", &[("version", &version)])),
+            Some(Err(error)) => launcher.flash(tf("flash.launcher_update_failed", &[("error", &error)])),
+            None => {}
+        }
         #[cfg(windows)]
         system::add_to_start_menu();
         launcher.apply_index();
@@ -206,10 +226,10 @@ impl Launcher {
     #[cfg(tray)]
     fn show_window(&mut self, ctx: &egui::Context, show: bool) {
         use egui::ViewportCommand;
+        self.hidden = !show;
         #[cfg(target_os = "macos")]
         {
             crate::tray::show_in_dock(show);
-            self.hidden = !show;
             self.was_active = crate::tray::is_active();
         }
         ctx.send_viewport_cmd(ViewportCommand::Visible(show));
@@ -370,6 +390,7 @@ impl Launcher {
                         self.fetch_icons();
                         self.detect();
                         self.check_releases();
+                        self.update_launcher(false);
                     }
                     FeedResult::Unchanged => {
                         self.catalog_error = None;
@@ -377,6 +398,7 @@ impl Launcher {
                         self.state.save(&self.paths);
                         self.detect();
                         self.check_releases();
+                        self.update_launcher(false);
                     }
                     FeedResult::Failed(e) => {
                         debug::log(format_args!("catalog check failed: {e}"));
@@ -442,6 +464,12 @@ impl Launcher {
                 self.index = index;
                 self.apply_index();
             }
+            Event::LauncherUpdate(result) => {
+                self.self_update = match result {
+                    Ok(ready) => SelfUpdate::Ready(ready),
+                    Err(e) => SelfUpdate::Failed(e),
+                };
+            }
             Event::Icon { id, image } => {
                 let icon = match image {
                     Some(image) => Icon::Ready(ctx.load_texture(format!("icon-{id}"), image, egui::TextureOptions::LINEAR)),
@@ -478,6 +506,45 @@ impl Launcher {
         self.catalog.as_ref().and_then(|c| c.app(id)).map_or_else(|| id.to_string(), |a| a.name.clone())
     }
 
+    /// The launcher version the catalog offers, when it's newer than this one, and its repository.
+    fn launcher_offered(&self) -> Option<(String, String)> {
+        let launcher = &self.catalog.as_ref()?.launcher;
+        let newer = version::is_newer(&launcher.version, env!("CARGO_PKG_VERSION")) && crate::catalog::valid_repo(&launcher.repo);
+        newer.then(|| (launcher.version.clone(), launcher.repo.clone()))
+    }
+
+    /// Starts downloading the launcher's new version, if there is one and this copy can update
+    /// itself: after each catalog check while checking automatically, or when asked.
+    fn update_launcher(&mut self, asked: bool) {
+        let Some((offered, repo)) = self.launcher_offered() else { return };
+        if matches!(self.self_update, SelfUpdate::Downloading | SelfUpdate::Ready(_))
+            || matches!(self.self_update_how, selfupdate::How::Manual(_))
+            || !(asked || self.state.settings.auto_check)
+        {
+            return;
+        }
+        self.self_update = SelfUpdate::Downloading;
+        self.worker.prepare_launcher_update(repo, offered, self.self_update_how.clone());
+    }
+
+    /// Restarts into the downloaded version, in the tray if `background`.
+    fn restart_into_update(&mut self, ctx: &egui::Context, background: bool) {
+        let SelfUpdate::Ready(ready) = &self.self_update else { return };
+        match selfupdate::apply(ready, &self.paths, background) {
+            Ok(()) => {
+                // Once only: the window takes a frame or two to close.
+                self.self_update = SelfUpdate::Idle;
+                self.state.save(&self.paths);
+                #[cfg(tray)]
+                {
+                    self.quitting = true;
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(e) => self.self_update = SelfUpdate::Failed(e),
+        }
+    }
+
     fn flash(&mut self, text: String) {
         self.message = Some((text, Instant::now()));
     }
@@ -508,7 +575,22 @@ impl Launcher {
     }
 
     fn update_count(&self) -> usize {
-        self.catalog.as_ref().map_or(0, |c| c.apps.iter().filter(|a| matches!(self.status(a), Status::Update { .. })).count())
+        let apps = self.catalog.as_ref().map_or(0, |c| c.apps.iter().filter(|a| matches!(self.status(a), Status::Update { .. })).count());
+        apps + usize::from(self.launcher_offered().is_some())
+    }
+
+    /// Whether the launcher's own card is on this page, ahead of the apps.
+    fn launcher_card_shown(&self) -> bool {
+        if self.catalog.is_none() {
+            return false;
+        }
+        let filter_ok = match &self.filter {
+            Filter::All | Filter::Installed => true,
+            Filter::Updates => self.launcher_offered().is_some(),
+            Filter::Category(_) => false,
+        };
+        let hay = format!("CraftCraft {}", i18n::text("card.launcher_tagline", &[])).to_lowercase();
+        filter_ok && self.search.to_lowercase().split_whitespace().all(|w| hay.contains(w))
     }
 
     /// The apps Update all would update: those with an Update button, not already under way.
@@ -604,6 +686,16 @@ impl eframe::App for Launcher {
         }
         #[cfg(tray)]
         self.tray(ctx);
+        // Waiting in the tray with nothing under way, no one is interrupted by a restart. Not when
+        // Windows would ask for an administrator's approval out of the blue.
+        #[cfg(tray)]
+        if self.hidden
+            && self.busy.is_empty()
+            && self.update_queue.is_empty()
+            && matches!(&self.self_update, SelfUpdate::Ready(ready) if !ready.asks_for_approval())
+        {
+            self.restart_into_update(ctx, true);
+        }
         self.schedule();
         // Wake up now and then to run the schedule even when nothing else happens.
         ctx.request_repaint_after(Duration::from_secs(60));
@@ -646,9 +738,11 @@ impl Launcher {
         // The sections scroll when the window is too short for them and the bottom of the sidebar.
         let nav_height = (ui.available_height() - self.sidebar_bottom - 12.0).max(60.0);
         egui::ScrollArea::vertical().id_salt("nav").max_height(nav_height).auto_shrink([false, true]).show(ui, |ui| {
-            let installed = self.catalog.as_ref().map_or(0, |c| c.apps.iter().filter(|a| self.is_installed(a)).count());
+            // CraftCraft's own card counts too.
+            let launcher = usize::from(self.catalog.is_some());
+            let installed = self.catalog.as_ref().map_or(0, |c| c.apps.iter().filter(|a| self.is_installed(a)).count()) + launcher;
             let updates = self.update_count();
-            let total = self.catalog.as_ref().map_or(0, |c| c.apps.len());
+            let total = self.catalog.as_ref().map_or(0, |c| c.apps.len()) + launcher;
             let mut chosen = None;
             section_label(ui, p, &t("nav.library"));
             if nav_item(ui, p, &t("nav.all"), total, self.filter == Filter::All, false) {
@@ -745,7 +839,7 @@ impl Launcher {
         ui.add_space(16.0);
 
         // The toolbar: search on the left, how many apps and their order on the right.
-        let shown = self.catalog.as_ref().map_or(0, |c| c.apps.iter().filter(|a| self.matches(a)).count());
+        let shown = self.catalog.as_ref().map_or(0, |c| c.apps.iter().filter(|a| self.matches(a)).count()) + usize::from(self.launcher_card_shown());
         // In a narrow window the count and the "Sort" label give way to the search box.
         let roomy = ui.available_width() >= 620.0;
         ui.horizontal(|ui| {
@@ -798,6 +892,47 @@ impl Launcher {
         }
     }
 
+    /// Offers the launcher's new version: downloading it, restarting into it, or for a copy that
+    /// can't update itself, its download page.
+    fn launcher_banner(&mut self, ui: &mut egui::Ui, p: Palette, new: &str, repo: &str) {
+        let releases = format!("https://github.com/{repo}/releases/latest");
+        let offered = tf("banner.launcher_update", &[("new", &new), ("current", &env!("CARGO_PKG_VERSION"))]);
+        match &self.self_update {
+            SelfUpdate::Ready(ready) => {
+                let title = tf("banner.launcher_ready", &[("new", &ready.version)]);
+                let body = ready.asks_for_approval().then(|| i18n::text("banner.launcher_ready_approval", &[]));
+                if banner(ui, p, p.action, "⬆", &title, body.as_deref(), &[t("banner.restart_to_update")]).is_some() {
+                    self.restart_into_update(&ui.ctx().clone(), false);
+                }
+            }
+            SelfUpdate::Downloading => {
+                banner(ui, p, p.action, "⬆", &tf("banner.launcher_downloading", &[("new", &new)]), None, &[]);
+            }
+            SelfUpdate::Failed(error) => {
+                let body = tf("banner.launcher_update_failed", &[("error", error)]);
+                match banner(ui, p, p.action, "⬆", &offered, Some(&body), &[t("banner.download"), t("catalog.try_again")]) {
+                    Some(0) => system::open_url(&releases),
+                    Some(_) => {
+                        self.self_update = SelfUpdate::Idle;
+                        self.update_launcher(true);
+                    }
+                    None => {}
+                }
+            }
+            SelfUpdate::Idle => {
+                let manual = matches!(self.self_update_how, selfupdate::How::Manual(_));
+                let button = t(if manual { "banner.download" } else { "banner.update" });
+                if banner(ui, p, p.action, "⬆", &offered, None, &[button]).is_some() {
+                    if manual {
+                        system::open_url(&releases);
+                    } else {
+                        self.update_launcher(true);
+                    }
+                }
+            }
+        }
+    }
+
     fn banners(&mut self, ui: &mut egui::Ui, p: Palette) {
         let Some(catalog) = self.catalog.clone() else {
             ui.vertical_centered(|ui| {
@@ -820,11 +955,10 @@ impl Launcher {
             return;
         };
 
-        if version::is_newer(&catalog.launcher.version, env!("CARGO_PKG_VERSION")) && crate::catalog::valid_repo(&catalog.launcher.repo) {
-            let text = tf("banner.launcher_update", &[("new", &catalog.launcher.version), ("current", &env!("CARGO_PKG_VERSION"))]);
-            if banner(ui, p, p.action, "⬆", &text, None, &[t("banner.download")]).is_some() {
-                system::open_url(&format!("https://github.com/{}/releases/latest", catalog.launcher.repo));
-            }
+        if let Some((new, repo)) = self.launcher_offered()
+            && !self.launcher_card_shown()
+        {
+            self.launcher_banner(ui, p, &new, &repo);
         }
 
         if telemetry::available() && !self.state.usage.asked {
@@ -875,7 +1009,8 @@ impl Launcher {
         let new_apps: HashSet<String> = self.state.new_apps(&catalog).into_iter().collect();
         let mut apps: Vec<&App> = catalog.apps.iter().filter(|a| self.matches(a)).collect();
         self.sort(&mut apps);
-        if apps.is_empty() {
+        let launcher = self.launcher_card_shown();
+        if apps.is_empty() && !launcher {
             ui.add_space(60.0);
             ui.vertical_centered(|ui| {
                 let key = match self.filter {
@@ -890,14 +1025,132 @@ impl Launcher {
         let width = ui.available_width();
         let columns = ((width + GAP) / (CARD_MIN_WIDTH + GAP)).floor().max(1.0) as usize;
         let card_width = (width - GAP * (columns as f32 - 1.0)) / columns as f32;
-        for row in apps.chunks(columns) {
+        // `None` is CraftCraft's own card.
+        let cards: Vec<Option<&App>> = launcher.then_some(None).into_iter().chain(apps.into_iter().map(Some)).collect();
+        for row in cards.chunks(columns) {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = GAP;
-                for app in row {
-                    self.card(ui, p, app, card_width, new_apps.contains(&app.id));
+                for card in row {
+                    match card {
+                        Some(app) => self.card(ui, p, app, card_width, new_apps.contains(&app.id)),
+                        None => self.launcher_card(ui, p, card_width),
+                    }
                 }
             });
             ui.add_space(GAP - ui.spacing().item_spacing.y);
+        }
+    }
+
+    /// CraftCraft's own card: its version, and updating it (see `selfupdate`). It isn't in the
+    /// catalog: the launcher can't install over itself the way it installs apps.
+    fn launcher_card(&mut self, ui: &mut egui::Ui, p: Palette, width: f32) {
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, CARD_HEIGHT), Sense::hover());
+        let hovered = response.hovered();
+        ui.painter().rect(
+            rect,
+            CornerRadius::same(14),
+            if hovered { p.hover } else { p.surface },
+            Stroke::new(1.0, if hovered { p.line_strong } else { p.line }),
+            egui::StrokeKind::Inside,
+        );
+        let inner = rect.shrink(18.0);
+        let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)));
+        let ui = &mut ui;
+        ui.spacing_mut().item_spacing = Vec2::new(8.0, 4.0);
+
+        ui.horizontal(|ui| {
+            logo(ui, 46.0);
+            ui.add_space(4.0);
+            ui.vertical(|ui| {
+                ui.add_space(2.0);
+                ui.label(RichText::new("CraftCraft").family(theme::strong()).size(16.5).color(p.ink));
+                ui.label(RichText::new(t("card.launcher_subtitle")).size(12.5).color(p.subtle));
+            });
+        });
+        ui.add_space(8.0);
+        ui.label(RichText::new(t("card.launcher_tagline")).family(theme::strong()).size(14.0).color(p.ink));
+
+        let foot = egui::Rect::from_min_max(egui::pos2(inner.left(), inner.bottom() - 32.0), inner.max);
+        ui.painter().hline(rect.x_range().shrink(1.0), foot.top() - 12.0, Stroke::new(1.0, p.line));
+        let mut foot_ui = ui.new_child(egui::UiBuilder::new().max_rect(foot).layout(Layout::left_to_right(Align::Center)));
+        self.launcher_card_footer(&mut foot_ui, p);
+    }
+
+    fn launcher_card_footer(&mut self, ui: &mut egui::Ui, p: Palette) {
+        let current = env!("CARGO_PKG_VERSION");
+        let offered = self.launcher_offered();
+        if let (SelfUpdate::Downloading, Some((new, _))) = (&self.self_update, &offered) {
+            spinner_label(ui, p, &tf("banner.launcher_downloading", &[("new", new)]));
+            return;
+        }
+        let repo = self.catalog.as_ref().map(|c| c.launcher.repo.clone()).filter(|r| crate::catalog::valid_repo(r));
+        // A copy that can't update itself says why on hover.
+        let manual = match &self.self_update_how {
+            selfupdate::How::Manual(why) => Some(why.clone()),
+            _ => None,
+        };
+        let (status_text, status_color, hint) = match (&self.self_update, &offered) {
+            (_, None) => (tf("status.installed_current", &[("version", &current)]), p.good, None),
+            (SelfUpdate::Ready(ready), _) => {
+                (tf("banner.launcher_ready", &[("new", &ready.version)]), p.accent, ready.asks_for_approval().then(|| i18n::text("banner.launcher_ready_approval", &[])))
+            }
+            (SelfUpdate::Failed(e), _) => (tf("status.failed", &[("failure", e)]), ui.visuals().error_fg_color, Some(e.clone())),
+            (_, Some((new, _))) => (tf("status.update", &[("from", &current), ("to", new)]), p.accent, manual.clone()),
+        };
+
+        enum Click {
+            Update,
+            Restart,
+            Download,
+        }
+        let mut click = None;
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.menu_button(RichText::new("⋯").size(16.0), |ui| {
+                ui.set_min_width(180.0);
+                if offered.is_some() && ui.button(t("banner.download")).clicked() {
+                    click = Some(Click::Download);
+                }
+                if let Some(repo) = &repo {
+                    if ui.button(t("menu.source")).clicked() {
+                        system::open_url(&format!("https://github.com/{repo}"));
+                    }
+                    let version = offered.as_ref().map_or(current, |(new, _)| new.as_str());
+                    if ui.button(tf("menu.release_notes", &[("version", &version)])).clicked() {
+                        system::open_url(&format!("https://github.com/{repo}/releases/tag/v{version}"));
+                    }
+                }
+            });
+            if offered.is_some() {
+                let (label, action) = match &self.self_update {
+                    SelfUpdate::Ready(_) => (t("banner.restart_to_update"), Click::Restart),
+                    SelfUpdate::Failed(_) => (t("catalog.try_again"), Click::Update),
+                    _ if manual.is_some() => (t("banner.download"), Click::Download),
+                    _ => (t("action.update"), Click::Update),
+                };
+                if primary(ui, p, &label).clicked() {
+                    click = Some(action);
+                }
+            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                let label = egui::Label::new(RichText::new(status_text).small().color(status_color)).truncate();
+                let label = ui.add(label.show_tooltip_when_elided(hint.is_none()));
+                if let Some(hint) = hint {
+                    hover(label, &hint);
+                }
+            });
+        });
+        match click {
+            Some(Click::Update) => {
+                self.self_update = SelfUpdate::Idle;
+                self.update_launcher(true);
+            }
+            Some(Click::Restart) => self.restart_into_update(&ui.ctx().clone(), false),
+            Some(Click::Download) => {
+                if let Some(repo) = &repo {
+                    system::open_url(&format!("https://github.com/{repo}/releases/latest"));
+                }
+            }
+            None => {}
         }
     }
 

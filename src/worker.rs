@@ -15,6 +15,7 @@ use crate::http::Http;
 use crate::index::{self, Index};
 use crate::install::{self, Failure, Stage};
 use crate::paths::Paths;
+use crate::selfupdate;
 use crate::state::Installed;
 
 pub enum Event {
@@ -43,6 +44,8 @@ pub enum Event {
     Detected(HashMap<String, Detected>),
     /// A newer release index; it always arrives before the catalog it belongs to.
     Index(Index),
+    /// A new version of the launcher, downloaded and ready to restart into, or why not.
+    LauncherUpdate(Result<selfupdate::Ready, String>),
 }
 
 pub struct Worker {
@@ -135,6 +138,18 @@ impl Worker {
                 }
             }
             _ = tx.send(Event::Installed { id, result });
+        });
+    }
+
+    /// Downloads the launcher's latest release from `repo`, ready to restart into.
+    pub fn prepare_launcher_update(&self, repo: String, offered: String, how: selfupdate::How) {
+        self.spawn("selfupdate", move |tx, http, paths, releases| {
+            let result = selfupdate::prepare(http, paths, releases, &repo, &offered, &how);
+            releases.save();
+            if let Err(e) = &result {
+                debug::log(format_args!("updating CraftCraft: {e}"));
+            }
+            _ = tx.send(Event::LauncherUpdate(result));
         });
     }
 

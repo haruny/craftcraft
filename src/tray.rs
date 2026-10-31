@@ -132,7 +132,7 @@ pub use instance::Instance;
 
 #[cfg(windows)]
 mod instance {
-    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, WAIT_OBJECT_0};
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, SetEvent, WaitForSingleObject};
     use windows_sys::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
 
@@ -159,12 +159,27 @@ mod instance {
                 return Some(Self(event as usize));
             }
             if !quietly {
-                // SAFETY: `event` is a valid event handle; the process exits soon after, closing it.
+                // SAFETY: `event` is a valid event handle.
                 unsafe {
                     // The user just started this copy, so it may hand the running one the foreground.
                     AllowSetForegroundWindow(ASFW_ANY);
                     SetEvent(event);
                 }
+            }
+            // SAFETY: `event` is a valid handle, not used again. Closed, so the event goes once the
+            // running launcher exits, for `after_restart`.
+            unsafe { CloseHandle(event) };
+            None
+        }
+
+        /// For a launcher an update started: waits (up to half a minute) for the old version to
+        /// quit, rather than showing its window.
+        pub fn after_restart() -> Option<Self> {
+            for _ in 0..120 {
+                if let Some(instance) = Self::claim(true) {
+                    return Some(instance);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
             }
             None
         }

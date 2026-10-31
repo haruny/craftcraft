@@ -61,6 +61,15 @@ Only one copy runs: opening CraftCraft again brings back the window of the one i
 Windows, a copy that wasn't installed by the script or the installer (unpacked from the zip, say)
 adds itself to the Start menu.
 
+CraftCraft updates itself. When the catalog says a newer version is out, it downloads that from
+[Releases](https://github.com/haruny/craftcraft/releases), checks the SHA-256 GitHub publishes
+for it, and offers **Restart to update**. If it's waiting in the tray, it restarts by itself,
+back into the tray. A copy installed with the `.msi` updates with the new `.msi` (for everyone,
+only when you click, since Windows asks for an administrator's approval). Other copies swap the
+new file in where the old one is. With **Check automatically** turned off, it waits for you to
+click **Update**. A copy in a folder CraftCraft can't write to just says there's a new version
+and links to it.
+
 **Settings → Debug mode** (everywhere) logs what CraftCraft does to `logs/craftcraft.log` in the data
 folder, and keeps downloaded installers and their logs instead of deleting them.
 
@@ -202,7 +211,8 @@ Pushing a tag like `v0.2.0` (matching `version` in `Cargo.toml`) runs
 the install script to test it, packages the signed Windows builds as `.msi` installers and tests
 those too, and publishes a GitHub release with the packages and a `SHA256SUMS` file. Running the
 workflow by hand does everything except publish: the builds are attached to the run, for testing.
-After a release, bump `launcher.version` in the catalog so older launchers offer the update.
+Its last job then sets `launcher.version` in the catalog to the new version and publishes the
+catalog, which is how running launchers hear about the release.
 
 To build and try a package locally, the way users get it:
 
@@ -216,6 +226,10 @@ $env:CRAFTCRAFT_DIST = "$PWD\dist"; ./install/install.ps1
 sh scripts/dist.sh                                   # macOS or Linux
 CRAFTCRAFT_DIST="$PWD/dist" sh install/install.sh
 ```
+
+To try the launcher updating itself without publishing a release, install a build with a lower
+version in `Cargo.toml`, then start it with `CRAFTCRAFT_UPDATE_DIST` set to a `dist` folder
+holding a newer one. It takes the update from there, as the version the catalog offers.
 
 ### Signing
 
