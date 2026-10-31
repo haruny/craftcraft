@@ -9,12 +9,15 @@ mod catalog;
 mod debug;
 mod detect;
 mod feed;
+mod fonts;
 mod github;
 mod http;
+mod i18n;
 mod icons;
 mod index;
 mod install;
 mod paths;
+mod selfupdate;
 mod state;
 mod system;
 mod telemetry;
@@ -41,16 +44,19 @@ fn main() -> std::process::ExitCode {
         }
         Some("--check-catalog") => return check_catalog(args.get(1).map(String::as_str)),
         Some("--detect") => return detect(args.get(1).map(String::as_str)),
-        // Started at logon: stay in the tray until asked for.
-        Some("--background") | None => {}
+        // Started at logon: stay in the tray until asked for. Started by an update (see
+        // `selfupdate`): take over from the old version, in the tray if it was there.
+        Some("--background" | "--restarted") | None => {}
         Some(other) => {
             eprintln!("unknown option {other}\nusage: craftcraft [--background | --version | --check-catalog <catalog.json> | --detect <catalog.json>]");
             return std::process::ExitCode::FAILURE;
         }
     }
-    let background = args.first().is_some_and(|a| a == "--background");
+    let background = args.iter().any(|a| a == "--background");
     #[cfg(windows)]
-    let Some(instance) = tray::Instance::claim(background) else {
+    let instance = if args.iter().any(|a| a == "--restarted") { tray::Instance::after_restart() } else { tray::Instance::claim(background) };
+    #[cfg(windows)]
+    let Some(instance) = instance else {
         return std::process::ExitCode::SUCCESS;
     };
 

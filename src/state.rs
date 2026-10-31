@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{Catalog, Method};
+use crate::i18n::{self, Lang};
 use crate::paths::{Paths, write_atomic};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -50,13 +51,15 @@ pub struct Settings {
     pub debug: bool,
     /// Send anonymous usage statistics, once the user has been told about them.
     pub share_usage: bool,
+    /// The language of the launcher's own text.
+    pub language: Lang,
 }
 
 pub const MAX_CHECK_HOURS: u32 = 168;
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { auto_check: true, check_hours: 8, close_to_tray: true, sort: Sort::Featured, debug: false, share_usage: true }
+        Self { auto_check: true, check_hours: 8, close_to_tray: true, sort: Sort::Featured, debug: false, share_usage: true, language: Lang::En }
     }
 }
 
@@ -77,13 +80,13 @@ pub enum Sort {
 impl Sort {
     pub const ALL: [Sort; 4] = [Sort::Featured, Sort::Popular, Sort::Name, Sort::Updated];
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Sort::Featured => "Featured",
-            Sort::Popular => "Most popular",
-            Sort::Name => "Name",
-            Sort::Updated => "Recently updated",
-        }
+    pub fn label(self) -> String {
+        i18n::t(match self {
+            Sort::Featured => "sort.featured",
+            Sort::Popular => "sort.popular",
+            Sort::Name => "sort.name",
+            Sort::Updated => "sort.updated",
+        })
     }
 }
 

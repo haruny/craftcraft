@@ -10,15 +10,20 @@ use eframe::egui;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
+use crate::i18n;
+
 /// What the tray icon (or another copy of the launcher) asks for.
 pub enum Action {
     Show,
     Check,
+    Sponsor,
     Quit,
 }
 
 pub struct Tray {
     icon: TrayIcon,
+    /// The menu's items, to relabel when the language changes.
+    items: [MenuItem; 4],
     #[cfg(windows)]
     tx: Sender<Action>,
     actions: Receiver<Action>,
@@ -28,17 +33,18 @@ pub struct Tray {
 impl Tray {
     pub fn new(ctx: &egui::Context) -> Result<Self, String> {
         let (tx, actions) = channel();
-        let open = MenuItem::new("Open CraftCraft", true, None);
-        let check = MenuItem::new("Check for updates", true, None);
-        let quit = MenuItem::new(if cfg!(target_os = "macos") { "Quit CraftCraft" } else { "Quit" }, true, None);
+        let [open, check, sponsor, quit] = labels().map(|label| MenuItem::new(label, true, None));
         let menu = Menu::new();
-        menu.append_items(&[&open, &check, &PredefinedMenuItem::separator(), &quit]).map_err(|e| e.to_string())?;
+        menu.append_items(&[&open, &check, &PredefinedMenuItem::separator(), &sponsor, &PredefinedMenuItem::separator(), &quit])
+            .map_err(|e| e.to_string())?;
 
-        let (open, check, quit) = (open.id().clone(), check.id().clone(), quit.id().clone());
+        let items = [open.clone(), check.clone(), sponsor.clone(), quit.clone()];
+        let (open, check, sponsor, quit) = (open.id().clone(), check.id().clone(), sponsor.id().clone(), quit.id().clone());
         let send = notifier(&tx, ctx);
         MenuEvent::set_event_handler(Some(move |e: MenuEvent| match e.id {
             id if id == open => send(Action::Show),
             id if id == check => send(Action::Check),
+            id if id == sponsor => send(Action::Sponsor),
             id if id == quit => send(Action::Quit),
             _ => {}
         }));
@@ -65,6 +71,7 @@ impl Tray {
         let icon = builder.build().map_err(|e| e.to_string())?;
         Ok(Self {
             icon,
+            items,
             #[cfg(windows)]
             tx,
             actions,
@@ -76,12 +83,25 @@ impl Tray {
         self.actions.try_iter()
     }
 
+    /// Puts the menu in the current language.
+    pub fn relabel(&self) {
+        for (item, label) in self.items.iter().zip(labels()) {
+            item.set_text(label);
+        }
+    }
+
     pub fn set_tooltip(&mut self, text: String) {
         if text != self.tooltip {
             _ = self.icon.set_tooltip(Some(&text));
             self.tooltip = text;
         }
     }
+}
+
+/// The menu's items, in the current language. The system draws them, so they're as written.
+fn labels() -> [String; 4] {
+    let quit = if cfg!(target_os = "macos") { "tray.quit_macos" } else { "tray.quit" };
+    ["tray.open", "tray.check", "tray.sponsor", quit].map(|key| i18n::text(key, &[]))
 }
 
 /// Sends an action and wakes the UI, which runs even while the window is hidden.
@@ -115,7 +135,7 @@ pub use instance::Instance;
 
 #[cfg(windows)]
 mod instance {
-    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, WAIT_OBJECT_0};
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, SetEvent, WaitForSingleObject};
     use windows_sys::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
 
@@ -142,12 +162,27 @@ mod instance {
                 return Some(Self(event as usize));
             }
             if !quietly {
-                // SAFETY: `event` is a valid event handle; the process exits soon after, closing it.
+                // SAFETY: `event` is a valid event handle.
                 unsafe {
                     // The user just started this copy, so it may hand the running one the foreground.
                     AllowSetForegroundWindow(ASFW_ANY);
                     SetEvent(event);
                 }
+            }
+            // SAFETY: `event` is a valid handle, not used again. Closed, so the event goes once the
+            // running launcher exits, for `after_restart`.
+            unsafe { CloseHandle(event) };
+            None
+        }
+
+        /// For a launcher an update started: waits (up to half a minute) for the old version to
+        /// quit, rather than showing its window.
+        pub fn after_restart() -> Option<Self> {
+            for _ in 0..120 {
+                if let Some(instance) = Self::claim(true) {
+                    return Some(instance);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
             }
             None
         }
