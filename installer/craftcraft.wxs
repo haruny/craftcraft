@@ -2,10 +2,22 @@
 <!--
   CraftCraft's Windows installer, built by scripts/msi.ps1 with WiX 3.
 
-  Like install.ps1, it installs for the current user (no admin rights) into
-  %LOCALAPPDATA%\Programs\CraftCraft, with a Start menu shortcut, and Settings > Apps uninstalls
-  it. The two can take turns: this removes the script's uninstall entry, and the script removes
-  this installer's copy before putting its own in place, so CraftCraft is only ever listed once.
+  Opened by double-clicking, it asks who CraftCraft is for:
+  - Only for me (the default; no admin rights): %LOCALAPPDATA%\Programs\CraftCraft, where
+    install.ps1 puts it too, with a Start menu shortcut for this user.
+  - Everyone: %ProgramFiles%\CraftCraft and every user's Start menu, once Windows has an
+    administrator's approval.
+  Without its window (msiexec /qn or /passive) it installs for the current user, or for everyone
+  with ALLUSERS=1. Either way Settings > Apps uninstalls it.
+
+  Windows Installer only upgrades a copy installed the same way, so an update has to make the same
+  choice as the copy it replaces. The other one is refused until that copy is uninstalled, rather
+  than leaving two.
+
+  For a copy that's just for the user, this and install.ps1 can take turns: this removes the
+  script's uninstall entry, and the script removes this installer's copy before putting its own in
+  place, so CraftCraft is only ever listed once. A script copy has to be uninstalled before
+  installing for everyone.
 
   The upgrade code never changes: it's how a newer installer finds the copy it replaces, and how
   install.ps1 finds one to remove.
@@ -13,8 +25,7 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="*" Name="CraftCraft" Language="1033" Version="$(var.Version)" Manufacturer="CraftCraft"
            UpgradeCode="8241B415-3A84-4BFB-94C1-7F03F92257D9">
-    <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser"
-             Description="Install, update and open software rewritten in Rust" />
+    <Package InstallerVersion="500" Compressed="yes" Description="Install, update and open software rewritten in Rust" />
     <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of CraftCraft is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
@@ -24,35 +35,55 @@
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="ARPNOREPAIR" Value="1" />
 
+    <!-- Just for the current user, unless the dialog or ALLUSERS=1 says everyone. -->
+    <Property Id="ALLUSERS" Value="2" />
+    <Property Id="MSIINSTALLPERUSER" Value="1" />
+    <Property Id="CRAFTCRAFT_SCOPE" Value="me" />
+
+    <!-- Copies already here: this installer's, just for this user or for everyone, and install.ps1's. -->
+    <Property Id="INSTALLED_FOR_ME" Secure="yes">
+      <RegistrySearch Id="MarkForMe" Root="HKCU" Key="Software\CraftCraft\Installer" Name="StartMenu" Type="raw" />
+    </Property>
+    <Property Id="INSTALLED_FOR_EVERYONE" Secure="yes">
+      <RegistrySearch Id="MarkForEveryone" Root="HKLM" Key="Software\CraftCraft\Installer" Name="StartMenu" Type="raw" Win64="yes" />
+    </Property>
+    <Property Id="INSTALLED_BY_SCRIPT" Secure="yes">
+      <RegistrySearch Id="ScriptEntry" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\CraftCraft" Name="UninstallString" Type="raw" />
+    </Property>
+
+    <Condition Message="CraftCraft is already installed just for you. Choose Only for me to update it, or uninstall that copy before installing it for everyone.">
+      <![CDATA[Installed OR ALLUSERS <> 1 OR NOT (INSTALLED_FOR_ME OR INSTALLED_BY_SCRIPT)]]>
+    </Condition>
+    <Condition Message="CraftCraft is already installed for everyone. Choose Everyone to update it (or pass ALLUSERS=1 to msiexec), or uninstall that copy before installing it just for you.">
+      <![CDATA[Installed OR ALLUSERS = 1 OR NOT INSTALLED_FOR_EVERYONE]]>
+    </Condition>
+
+    <!-- Program Files for everyone. For one user it's the same folder install.ps1 uses (Windows
+         would pick it too, but this doesn't leave that to chance). An installed copy stays put. -->
     <Directory Id="TARGETDIR" Name="SourceDir">
-      <Directory Id="LocalAppDataFolder">
-        <Directory Id="ProgramsFolder" Name="Programs">
-          <Directory Id="INSTALLFOLDER" Name="CraftCraft" />
-        </Directory>
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="CraftCraft" />
       </Directory>
       <Directory Id="ProgramMenuFolder" />
     </Directory>
+    <SetDirectory Id="INSTALLFOLDER" Value="[LocalAppDataFolder]Programs\CraftCraft\"><![CDATA[NOT Installed AND ALLUSERS <> 1]]></SetDirectory>
 
-    <!-- Files in a user's profile need a registry value as their key path, and their folders
-         removed explicitly (Programs only when it's left empty). WiX can't generate the GUID of a
-         component with a file and a registry key path, so this one is written out. Keep it while
-         the exe installs to the same place; if that ever changes, the component needs a new one. -->
+    <!-- Taking over from install.ps1 (just for this user): its uninstaller, and below, its
+         Settings > Apps entry. -->
     <DirectoryRef Id="INSTALLFOLDER">
-      <Component Id="Launcher" Guid="BF4436E5-58D9-4A64-A073-4B761FA15305">
-        <File Id="craftcraft.exe" Source="$(var.Exe)" />
-        <RegistryValue Root="HKCU" Key="Software\CraftCraft\Installer" Name="Launcher" Type="integer" Value="1" KeyPath="yes" />
-        <!-- Taking over from install.ps1: its uninstaller and Settings > Apps entry. -->
+      <Component Id="Launcher" Guid="*">
+        <File Id="craftcraft.exe" Source="$(var.Exe)" KeyPath="yes" />
         <RemoveFile Id="ScriptUninstaller" Name="uninstall.ps1" On="install" />
-        <RemoveRegistryKey Action="removeOnInstall" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\CraftCraft" />
-        <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
-        <RemoveFolder Id="RemoveProgramsFolder" Directory="ProgramsFolder" On="uninstall" />
       </Component>
     </DirectoryRef>
+    <!-- HKMU is HKCU for one user and HKLM for everyone, so the shortcut's key path is also the mark
+         the next installer looks for. Installers before the choice wrote it to HKCU. -->
     <DirectoryRef Id="ProgramMenuFolder">
       <Component Id="StartMenu" Guid="*">
         <Shortcut Id="StartMenuShortcut" Name="CraftCraft" Description="Install, update and open software rewritten in Rust"
                   Target="[#craftcraft.exe]" WorkingDirectory="INSTALLFOLDER" />
-        <RegistryValue Root="HKCU" Key="Software\CraftCraft\Installer" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
+        <RegistryValue Root="HKMU" Key="Software\CraftCraft\Installer" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
+        <RemoveRegistryKey Action="removeOnInstall" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\CraftCraft" />
       </Component>
     </DirectoryRef>
 
@@ -75,13 +106,97 @@
                  Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -Command &quot;Remove-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name CraftCraft -ErrorAction SilentlyContinue&quot;" />
     <CustomAction Id="ForgetLogon" BinaryKey="WixCA" DllEntry="WixQuietExec64" Execute="immediate" Return="ignore" />
 
-    <!-- Opened by double-clicking (full UI), it starts CraftCraft once installed, as the script does. -->
-    <CustomAction Id="Launch" FileKey="craftcraft.exe" ExeCommand="" Return="asyncNoWait" Impersonate="yes" />
-
     <InstallExecuteSequence>
       <Custom Action="StopLauncher" Before="InstallValidate" />
       <Custom Action="ForgetLogon" After="SetForgetLogon">REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE AND NOT KEEPSETTINGS</Custom>
-      <Custom Action="Launch" After="InstallFinalize">UILevel = 5 AND NOT REMOVE</Custom>
     </InstallExecuteSequence>
+
+    <!-- Opened by double-clicking, the finishing page offers to open CraftCraft, as the script
+         does. From the window, not the install, so an install for everyone doesn't start it as
+         administrator. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Open CraftCraft" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#craftcraft.exe]" />
+    <CustomAction Id="Launch" BinaryKey="WixCA" DllEntry="WixShellExec" Impersonate="yes" />
+
+    <!-- WixUI_Minimal, with the choice of who it's for in place of the license page. -->
+    <UI Id="CraftCraftUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+      <TextStyle Id="WixUI_Font_Emphasized" FaceName="Tahoma" Size="8" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+      <Property Id="WixUI_Mode" Value="Minimal" />
+
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+
+      <Dialog Id="ScopeDlg" Width="370" Height="270" Title="!(loc.WelcomeDlg_Title)">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallScopeDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Install [ProductName]" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="20" Transparent="yes" NoPrefix="yes" Text="Who should be able to use it on this computer?" />
+        <Control Id="Scope" Type="RadioButtonGroup" X="20" Y="58" Width="330" Height="110" Property="CRAFTCRAFT_SCOPE">
+          <RadioButtonGroup Property="CRAFTCRAFT_SCOPE">
+            <RadioButton Value="me" X="0" Y="0" Width="320" Height="16" Text="{\WixUI_Font_Emphasized}&amp;Only for me ([LogonUser])" />
+            <RadioButton Value="everyone" X="0" Y="56" Width="320" Height="16" Text="{\WixUI_Font_Emphasized}&amp;Everyone who uses this computer" />
+          </RadioButtonGroup>
+        </Control>
+        <Control Id="MeDescription" Type="Text" X="33" Y="76" Width="310" Height="30" NoPrefix="yes"
+                 Text="Installs in your user folder and your Start menu. No administrator rights needed." />
+        <Control Id="EveryoneDescription" Type="Text" X="33" Y="132" Width="310" Height="30" NoPrefix="yes"
+                 Text="Installs in Program Files and everyone's Start menu. Windows asks for an administrator's approval." />
+        <Control Id="InstalledNote" Type="Text" X="20" Y="190" Width="330" Height="30" NoPrefix="yes" Hidden="yes"
+                 Text="[ProductName] is already on this computer. To update it, keep the choice it was installed with." >
+          <Condition Action="show">INSTALLED_FOR_ME OR INSTALLED_FOR_EVERYONE OR INSTALLED_BY_SCRIPT</Condition>
+        </Control>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="156" Y="243" Width="56" Height="17" Disabled="yes" Text="!(loc.WixUIBack)" />
+        <!-- Two Install buttons, as in VerifyReadyDlg: the one for everyone has the UAC shield. -->
+        <Control Id="Install" Type="PushButton" ElevationShield="yes" X="212" Y="243" Width="80" Height="17" Default="yes" Hidden="yes" Text="!(loc.VerifyReadyDlgInstall)">
+          <Condition Action="show">CRAFTCRAFT_SCOPE = "everyone"</Condition>
+          <Condition Action="hide">CRAFTCRAFT_SCOPE &lt;&gt; "everyone"</Condition>
+          <Publish Property="ALLUSERS" Value="1" Order="1">1</Publish>
+          <Publish Property="MSIINSTALLPERUSER" Value="{}" Order="2">1</Publish>
+          <Publish Event="EndDialog" Value="Return" Order="3">1</Publish>
+        </Control>
+        <Control Id="InstallNoShield" Type="PushButton" ElevationShield="no" X="212" Y="243" Width="80" Height="17" Default="yes" Hidden="yes" Text="!(loc.VerifyReadyDlgInstall)">
+          <Condition Action="show">CRAFTCRAFT_SCOPE &lt;&gt; "everyone"</Condition>
+          <Condition Action="hide">CRAFTCRAFT_SCOPE = "everyone"</Condition>
+          <Publish Property="ALLUSERS" Value="2" Order="1">1</Publish>
+          <Publish Property="MSIINSTALLPERUSER" Value="1" Order="2">1</Publish>
+          <Publish Event="EndDialog" Value="Return" Order="3">1</Publish>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+      </Dialog>
+
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="Launch" Order="1">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed</Publish>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999">1</Publish>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg">1</Publish>
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg">1</Publish>
+
+      <!-- The choice comes after the searches, to start on the copy that's already here, and before
+           FindRelatedProducts: that only looks among copies installed the same way, and having
+           run here, it doesn't run again in the install. -->
+      <InstallUISequence>
+        <Show Dialog="ScopeDlg" Sequence="60">NOT Installed AND NOT REMOVE AND UILevel = 5</Show>
+        <FindRelatedProducts Sequence="61" />
+      </InstallUISequence>
+    </UI>
+    <UIRef Id="WixUI_Common" />
+    <SetProperty Id="CRAFTCRAFT_SCOPE" Value="everyone" After="AppSearch" Sequence="ui">
+      <![CDATA[ALLUSERS = 1 OR (INSTALLED_FOR_EVERYONE AND NOT INSTALLED_FOR_ME AND NOT INSTALLED_BY_SCRIPT)]]>
+    </SetProperty>
   </Product>
 </Wix>

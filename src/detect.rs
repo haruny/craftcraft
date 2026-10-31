@@ -82,7 +82,7 @@ struct Registered {
     location: Option<PathBuf>,
     icon: Option<PathBuf>,
     uninstall: Option<String>,
-    /// Listed in HKEY_LOCAL_MACHINE: installed for every user.
+    /// Installed for every user (see [`registered_programs`]).
     for_everyone: bool,
 }
 
@@ -177,13 +177,21 @@ fn registered_programs() -> Vec<Registered> {
             if sub.get_value::<u32, _>("SystemComponent").is_ok_and(|v| v == 1) {
                 continue;
             }
+            let uninstall = get("UninstallString");
+            // Other installers list a copy for everyone in HKLM and one for a user in HKCU, but
+            // Windows Installer lists both in HKLM: only its own records tell them apart.
+            let windows_installer = sub.get_value::<u32, _>("WindowsInstaller").is_ok_and(|v| v == 1);
+            let for_everyone = match msi_product(&name, windows_installer, uninstall.as_deref()) {
+                Some(product) => msi_for_everyone(&product),
+                None => root == HKEY_LOCAL_MACHINE,
+            };
             out.push(Registered {
                 name: display,
                 version: get("DisplayVersion"),
                 location: get("InstallLocation").map(PathBuf::from),
                 icon: get("DisplayIcon").map(|i| PathBuf::from(i.split(',').next().unwrap_or_default().trim_matches('"'))),
-                uninstall: get("UninstallString"),
-                for_everyone: root == HKEY_LOCAL_MACHINE,
+                uninstall,
+                for_everyone,
             });
         }
     }
@@ -193,6 +201,52 @@ fn registered_programs() -> Vec<Registered> {
 #[cfg(not(windows))]
 fn registered_programs() -> Vec<Registered> {
     Vec::new()
+}
+
+/// Whether Windows Installer installed `product` for every user: then it's listed among the
+/// computer's products, not only a user's.
+#[cfg(windows)]
+fn msi_for_everyone(product: &str) -> bool {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    packed_code(product).is_some_and(|packed| RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(format!(r"SOFTWARE\Classes\Installer\Products\{packed}")).is_ok())
+}
+
+/// The Windows Installer product behind an Uninstall entry: the entry's own name when Windows
+/// Installer wrote it, or the product its `msiexec /x {…}` removes.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn msi_product(key: &str, windows_installer: bool, uninstall: Option<&str>) -> Option<String> {
+    if windows_installer && is_guid(key) {
+        return Some(key.to_string());
+    }
+    let command = uninstall.filter(|u| u.to_ascii_lowercase().contains("msiexec"))?;
+    let start = command.find('{')?;
+    command.get(start..start + 38).filter(|code| is_guid(code)).map(str::to_string)
+}
+
+/// `{1C6822F4-52C8-47B6-B76D-C410EA5220CF}`
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_guid(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 38
+        && b[0] == b'{'
+        && b[37] == b'}'
+        && b[1..37].iter().enumerate().all(|(i, c)| if [8, 13, 18, 23].contains(&i) { *c == b'-' } else { c.is_ascii_hexdigit() })
+}
+
+/// How Windows Installer's registry spells a product code: the first three groups reversed, then
+/// each pair of digits after them swapped.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn packed_code(code: &str) -> Option<String> {
+    if !is_guid(code) {
+        return None;
+    }
+    let hex: Vec<char> = code.chars().filter(char::is_ascii_hexdigit).map(|c| c.to_ascii_uppercase()).collect();
+    let mut out: String = [0..8, 8..12, 12..16].into_iter().flat_map(|r| hex[r].iter().rev()).collect();
+    for pair in hex[16..].chunks(2) {
+        out.extend([pair[1], pair[0]]);
+    }
+    Some(out)
 }
 
 fn detect_macos(app: &App) -> Option<Detected> {
@@ -338,5 +392,22 @@ mod tests {
         assert_eq!(found.version.as_deref(), Some("0.13.0"));
         assert_eq!(found.uninstall.as_deref(), Some("MsiExec.exe /X{60C26D84}"));
         assert!(found.for_everyone);
+    }
+
+    #[test]
+    fn finds_windows_installer_products() {
+        // CraftCraft installed just for one user, and DeckCraft for everyone, as listed on a real computer.
+        assert_eq!(packed_code("{1C6822F4-52C8-47B6-B76D-C410EA5220CF}").as_deref(), Some("4F2286C18C256B747BD64C01AE2502FC"));
+        assert_eq!(packed_code("{6d0c3f9e-8e6f-4669-9822-0711634ce881}").as_deref(), Some("E9F3C0D6F6E896648922701136C48E18"));
+        assert_eq!(packed_code("{6D0C3F9E-8E6F-4669-9822-0711634CE88}"), None);
+
+        let code = "{6D0C3F9E-8E6F-4669-9822-0711634CE881}";
+        assert_eq!(msi_product(code, true, Some(&format!("MsiExec.exe /I{code}"))).as_deref(), Some(code));
+        // An installer's own entry, removing the product it installed.
+        let designcraft = r#""C:\Windows\system32\msiexec.exe" /x {449AFDF4-C57B-4451-8602-B5CA5A0E3D38} /qf /norestart"#;
+        assert_eq!(msi_product("Craft.designcraft", false, Some(designcraft)).as_deref(), Some("{449AFDF4-C57B-4451-8602-B5CA5A0E3D38}"));
+        // Inno Setup's `{…}_is1` entries aren't Windows Installer's.
+        assert_eq!(msi_product("{444B39B7-B4F5-4591-8196-5A4CC453D928}_is1", false, Some(r#""C:\x\unins000.exe""#)), None);
+        assert_eq!(msi_product(code, false, None), None);
     }
 }

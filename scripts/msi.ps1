@@ -26,12 +26,13 @@ $obj = Join-Path ([IO.Path]::GetTempPath()) "craftcraft-msi-$Arch"
 New-Item -ItemType Directory -Force $obj, $Out | Out-Null
 $msi = Join-Path $Out "craftcraft-windows-$Arch.msi"
 
-& "$bin\candle.exe" -nologo -arch $platform -ext WixUtilExtension `
+& "$bin\candle.exe" -nologo -arch $platform -ext WixUtilExtension -ext WixUIExtension `
     "-dVersion=$version" "-dExe=$exe" "-dIcon=$((Resolve-Path assets/icon.ico).Path)" `
     -out "$obj\" installer/craftcraft.wxs
 if ($LASTEXITCODE -ne 0) { throw 'candle failed' }
-# ICE91 only warns that per-user files don't follow a user who installs for everyone; this one can't.
-& "$bin\light.exe" -nologo -ext WixUtilExtension -sice:ICE91 -spdb -out $msi "$obj\craftcraft.wixobj"
+# ICE91 only warns that the Start menu shortcut is in a per-user folder; installing for everyone
+# puts it in everyone's, which ICE91 can't tell.
+& "$bin\light.exe" -nologo -ext WixUtilExtension -ext WixUIExtension -cultures:en-us -sice:ICE91 -spdb -out $msi "$obj\craftcraft.wixobj"
 if ($LASTEXITCODE -ne 0) { throw 'light failed' }
 
 Write-Host "Built $msi ($version)"

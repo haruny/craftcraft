@@ -4,6 +4,7 @@
 //! into a staging folder and swapped in only once complete, so a failed update leaves the old
 //! version working. Installers (.msi, .exe, .dmg, .pkg, .deb, .rpm) are handed to the system.
 
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
@@ -11,9 +12,9 @@ use std::process::Command;
 
 use crate::catalog::{App, Kind, Method, Os, Platform};
 use crate::github::Release;
-use crate::now;
 use crate::paths::Paths;
 use crate::state::Installed;
+use crate::{debug, now};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Stage {
@@ -26,6 +27,62 @@ pub enum Stage {
     Installer,
 }
 
+/// The step an install (or opening or removing an app) failed at, which the card names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// Finding this computer's file in the release.
+    Find,
+    Download,
+    Checksum,
+    Unpack,
+    /// Putting the app in its folder, and its commands in `bin`.
+    Setup,
+    /// The system installer.
+    Installer,
+    Open,
+    Uninstall,
+}
+
+impl Step {
+    pub fn failed(self) -> &'static str {
+        match self {
+            Step::Find => "No download",
+            Step::Download => "Download failed",
+            Step::Checksum => "Checksum failed",
+            Step::Unpack => "Unpacking failed",
+            Step::Setup => "Install failed",
+            Step::Installer => "Installer failed",
+            Step::Open => "Couldn't open",
+            Step::Uninstall => "Uninstall failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Failure {
+    pub step: Step,
+    pub message: String,
+    /// The system installer's log, when it kept one.
+    pub log: Option<PathBuf>,
+}
+
+impl Failure {
+    pub fn new(step: Step, message: impl Into<String>) -> Self {
+        Self { step, message: message.into(), log: None }
+    }
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.step.failed(), self.message)
+    }
+}
+
+/// Turns an error from `step` into a [`Failure`], for `map_err`.
+fn at(step: Step) -> impl Fn(String) -> Failure {
+    move |message| Failure::new(step, message)
+}
+
 pub fn install(
     paths: &Paths,
     http: &crate::http::Http,
@@ -34,42 +91,45 @@ pub fn install(
     platform: Platform,
     for_everyone: bool,
     mut stage: impl FnMut(Stage),
-) -> Result<Installed, String> {
-    let (spec, method) = app.asset_for(platform).ok_or_else(|| format!("{} has no build for {}", app.name, platform.key()))?;
-    let asset = release.pick(spec.pattern())?;
+) -> Result<Installed, Failure> {
+    let (spec, method) = app.asset_for(platform).ok_or_else(|| format!("{} has no build for {}", app.name, platform.key())).map_err(at(Step::Find))?;
+    let asset = release.pick(spec.pattern()).map_err(at(Step::Find))?;
     if asset.name.is_empty() || asset.name.contains(['/', '\\']) || asset.name.starts_with('.') {
-        return Err(format!("refusing a download named {:?}", asset.name));
+        return Err(Failure::new(Step::Find, format!("refusing a download named {:?}", asset.name)));
     }
 
     let part = paths.downloads().join(format!("{}.part", asset.name));
     let file = paths.downloads().join(&asset.name);
+    debug::log(format_args!("{} {}: downloading {}", app.id, release.tag, asset.url));
     let sha = http
         .download(&asset.url, &part, |done, total| stage(Stage::Downloading { done, total: total.or((asset.size > 0).then_some(asset.size)) }))
-        .inspect_err(|_| _ = fs::remove_file(&part))?;
+        .inspect_err(|_| _ = fs::remove_file(&part))
+        .map_err(at(Step::Download))?;
     let verified = match &asset.sha256 {
         Some(expected) if *expected == sha => true,
         Some(expected) => {
             _ = fs::remove_file(&part);
-            return Err(format!("{} failed its checksum (expected {expected}, got {sha}); it was deleted", asset.name));
+            return Err(Failure::new(Step::Checksum, format!("{} failed its checksum (expected {expected}, got {sha}); it was deleted", asset.name)));
         }
         None => false,
     };
-    fs::rename(&part, &file).map_err(|e| format!("{}: {e}", file.display()))?;
+    debug::log(format_args!("{}: SHA-256 {sha}, {}", asset.name, if verified { "as published" } else { "none published" }));
+    fs::rename(&part, &file).map_err(|e| format!("{}: {e}", file.display())).map_err(at(Step::Download))?;
 
     stage(Stage::Installing);
     let (path, bins) = match method {
         Method::Archive => {
-            let dir = swap_in(paths, &app.id, |staging| extract(&file, &asset.name, staging))?;
+            let dir = swap_in(paths, &app.id, Step::Unpack, |staging| extract(&file, &asset.name, staging))?;
             _ = fs::remove_file(&file);
             let bins = find_bins(&dir, &app.bin, platform.os);
             if bins.is_empty() {
-                return Err(format!("unpacked {}, but couldn't find {} in it", asset.name, app.bin.join(", ")));
+                return Err(Failure::new(Step::Unpack, format!("unpacked {}, but couldn't find {} in it", asset.name, app.bin.join(", "))));
             }
             (dir, bins)
         }
         Method::Portable => {
             let name = asset.name.clone();
-            let dir = swap_in(paths, &app.id, |staging| {
+            let dir = swap_in(paths, &app.id, Step::Setup, |staging| {
                 fs::create_dir_all(staging).map_err(|e| e.to_string())?;
                 fs::rename(&file, staging.join(&name)).or_else(|_| fs::copy(&file, staging.join(&name)).map(drop)).map_err(|e| e.to_string())?;
                 make_executable(&staging.join(&name))
@@ -80,13 +140,20 @@ pub fn install(
         }
         Method::Installer => {
             stage(Stage::Installer);
-            run_installer(&file, platform.os, for_everyone)?;
+            let log = paths.logs().join(Path::new(&asset.name).with_extension("log"));
+            let result = run_installer(&file, platform.os, for_everyone, &log);
+            // Windows' installers have finished when they return (and Windows Installer keeps its own
+            // copy). Elsewhere the user is still in the window that opened; tidy() clears it later.
+            if platform.os == Os::Windows && !debug::enabled() {
+                _ = fs::remove_file(&file);
+            }
+            result?;
             (file, Vec::new())
         }
-        Method::Unknown => return Err("this launcher doesn't know how to install that file; update CraftCraft".into()),
+        Method::Unknown => return Err(Failure::new(Step::Find, "this launcher doesn't know how to install that file; update CraftCraft")),
     };
     if app.kind != Kind::Gui {
-        write_shims(paths, &app.id, &bins)?;
+        write_shims(paths, &app.id, &bins).map_err(at(Step::Setup))?;
     }
     Ok(Installed { tag: release.tag.clone(), method, path, bins, verified, installed_at: now() })
 }
@@ -104,31 +171,32 @@ pub fn uninstall(paths: &Paths, id: &str, installed: &Installed) -> Result<(), S
     Ok(())
 }
 
-/// Builds the new version in a staging folder with `fill`, then swaps it in for the old one.
-fn swap_in(paths: &Paths, id: &str, fill: impl FnOnce(&Path) -> Result<(), String>) -> Result<PathBuf, String> {
+/// Builds the new version in a staging folder with `fill` (whose errors are `step`'s), then swaps it
+/// in for the old one.
+fn swap_in(paths: &Paths, id: &str, step: Step, fill: impl FnOnce(&Path) -> Result<(), String>) -> Result<PathBuf, Failure> {
     let target = paths.app_dir(id);
     let staging = paths.apps().join(format!(".{id}.new"));
     let old = paths.apps().join(format!(".{id}.old"));
     for leftover in [&staging, &old] {
         if leftover.exists() {
-            fs::remove_dir_all(leftover).map_err(|e| format!("couldn't clear {}: {e}", leftover.display()))?;
+            fs::remove_dir_all(leftover).map_err(|e| Failure::new(Step::Setup, format!("couldn't clear {}: {e}", leftover.display())))?;
         }
     }
     if let Err(e) = fill(&staging) {
         _ = fs::remove_dir_all(&staging);
-        return Err(e);
+        return Err(Failure::new(step, e));
     }
     let root = single_folder(&staging).unwrap_or_else(|| staging.clone());
 
     if target.exists() {
-        fs::rename(&target, &old).map_err(|_| "couldn't replace the installed version. Close the app and try again.".to_string())?;
+        fs::rename(&target, &old).map_err(|_| Failure::new(Step::Setup, "couldn't replace the installed version. Close the app and try again."))?;
     }
     if let Err(e) = fs::rename(&root, &target) {
         if old.exists() {
             _ = fs::rename(&old, &target);
         }
         _ = fs::remove_dir_all(&staging);
-        return Err(format!("couldn't move the new version into place: {e}"));
+        return Err(Failure::new(Step::Setup, format!("couldn't move the new version into place: {e}")));
     }
     _ = fs::remove_dir_all(&staging);
     _ = fs::remove_dir_all(&old);
@@ -289,36 +357,88 @@ fn remove_shims(paths: &Paths, id: &str) {
     }
 }
 
-fn run_installer(file: &Path, os: Os, for_everyone: bool) -> Result<(), String> {
-    let lower = file.to_string_lossy().to_ascii_lowercase();
-    let status = match os {
+/// Runs `file` and waits for it. An .msi logs to `log`, which is where the reason for a failure is
+/// found; the log is kept only then (or in debug mode).
+fn run_installer(file: &Path, os: Os, for_everyone: bool, log: &Path) -> Result<(), Failure> {
+    let msi = os == Os::Windows && file.to_string_lossy().to_ascii_lowercase().ends_with(".msi");
+    let mut command = match os {
         // `/passive` shows progress without wizard pages; an installed older version is upgraded in place.
         // An installer that can go either way installs for the current user unless told otherwise, and
         // won't upgrade a copy installed for everyone from there.
-        Os::Windows if lower.ends_with(".msi") => {
+        Os::Windows if msi => {
             let mut msiexec = Command::new("msiexec");
-            msiexec.arg("/i").arg(file).arg("/passive");
+            msiexec.arg("/i").arg(file).arg("/passive").arg("/l*v").arg(log);
             if for_everyone {
                 msiexec.arg("ALLUSERS=1");
             }
-            msiexec.status()
+            msiexec
         }
-        Os::Windows => Command::new(file).status(),
+        Os::Windows => Command::new(file),
         // These open the disk image, the macOS Installer, or the Linux software centre, and
         // return straight away; the user finishes the install there.
-        Os::Macos => Command::new("open").arg(file).status(),
-        Os::Linux => Command::new("xdg-open").arg(file).status(),
+        Os::Macos => Command::new("open"),
+        Os::Linux => Command::new("xdg-open"),
+    };
+    if !matches!(os, Os::Windows) {
+        command.arg(file);
     }
-    .map_err(|e| format!("couldn't start the installer: {e}"))?;
-    match status.code() {
-        Some(0 | 3010) => Ok(()), // 3010: installed, restart needed
-        Some(1602) => Err("the installation was cancelled".into()),
-        Some(code) => Err(format!("the installer stopped with code {code}")),
-        None => Err("the installer was stopped".into()),
+    debug::log(format_args!("running {command:?}"));
+    let status = command.status().map_err(|e| Failure::new(Step::Installer, format!("couldn't start the installer: {e}")))?;
+    debug::log(format_args!("the installer exited: {status}"));
+    let code = status.code();
+    // 1641 and 3010: installed, and a restart is needed (or under way).
+    if matches!(code, Some(0 | 1641 | 3010)) {
+        if msi && !debug::enabled() {
+            _ = fs::remove_file(log);
+        }
+        return Ok(());
+    }
+    let reason = if msi { fs::read(log).ok().and_then(|bytes| msi_error(&decode_log(&bytes))) } else { None };
+    let message = match (code, reason) {
+        (Some(1602), _) => "the installation was cancelled".to_string(),
+        (Some(code), Some(reason)) => format!("{reason} (code {code})"),
+        (Some(code), None) => exit_meaning(code).map_or_else(|| format!("the installer stopped with code {code}"), |m| format!("{m} (code {code})")),
+        (None, _) => "the installer was stopped".to_string(),
+    };
+    Err(Failure { step: Step::Installer, message, log: Some(log.to_path_buf()).filter(|l| msi && l.is_file()) })
+}
+
+/// Why Windows Installer failed, from its log: the reason it gives on a `Product: <name> -- <reason>`
+/// line (which also goes to the event log) ahead of the "Installation failed." that follows, or
+/// failing that, an `Error 1925. …` line.
+fn msi_error(log: &str) -> Option<String> {
+    const OUTCOMES: [&str; 4] = ["Installation failed.", "Installation operation failed.", "Removal failed.", "Configuration failed."];
+    let product = log
+        .lines()
+        .filter_map(|line| line.split_once("Product: ")?.1.split_once(" -- ").map(|(_, reason)| reason.trim()))
+        .find(|reason| !reason.is_empty() && !reason.ends_with("completed successfully.") && !OUTCOMES.contains(reason));
+    let error = || log.lines().map(str::trim).find(|line| line.strip_prefix("Error ").is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit())));
+    let reason = product.or_else(error)?;
+    Some(if reason.chars().count() > 400 { format!("{}…", reason.chars().take(400).collect::<String>()) } else { reason.to_string() })
+}
+
+/// Windows Installer writes its logs in UTF-16.
+fn decode_log(bytes: &[u8]) -> String {
+    match bytes.strip_prefix(&[0xff, 0xfe]) {
+        Some(utf16) => String::from_utf16_lossy(&utf16.as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair)).collect::<Vec<_>>()),
+        None => String::from_utf8_lossy(bytes).into_owned(),
     }
 }
 
-/// Clears out interrupted work and installers older than a week.
+/// What Windows Installer's exit codes mean, for when its log doesn't say.
+fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        1603 => "the installer ran into an error",
+        1618 => "another installation is under way; try again once it's done",
+        1619 | 1620 => "Windows couldn't open the installer",
+        1625 => "Windows didn't allow this installation; it may need an administrator's approval",
+        1633 => "this installer isn't for this computer's processor",
+        1638 => "another version of this app is installed; uninstall it first",
+        _ => return None,
+    })
+}
+
+/// Clears out interrupted work, installers left behind, and installers' logs older than a week.
 pub fn tidy(paths: &Paths) {
     if let Ok(entries) = fs::read_dir(paths.apps()) {
         for e in entries.filter_map(Result::ok) {
@@ -329,11 +449,22 @@ pub fn tidy(paths: &Paths) {
         }
     }
     let week = std::time::Duration::from_secs(7 * 24 * 3600);
+    let older = |e: &fs::DirEntry| e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > week);
+    // Only one launcher runs on Windows, and its installers have finished when they return, so
+    // anything there now is left over. Elsewhere a disk image may still be open.
+    let leftovers = cfg!(windows) && !debug::enabled();
     if let Ok(entries) = fs::read_dir(paths.downloads()) {
         for e in entries.filter_map(Result::ok) {
-            let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > week);
             let partial = e.file_name().to_string_lossy().ends_with(".part");
-            if old || partial {
+            if leftovers || partial || older(&e) {
+                _ = fs::remove_file(e.path());
+            }
+        }
+    }
+    // The launcher's own log starts over by itself.
+    if let Ok(entries) = fs::read_dir(paths.logs()) {
+        for e in entries.filter_map(Result::ok) {
+            if !e.file_name().to_string_lossy().starts_with("craftcraft.") && older(&e) {
                 _ = fs::remove_file(e.path());
             }
         }
@@ -349,7 +480,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("craftcraft-test-{name}-{}", std::process::id()));
         _ = fs::remove_dir_all(&root);
         let paths = Paths { root };
-        for d in [paths.apps(), paths.bin(), paths.downloads(), paths.cache()] {
+        for d in [paths.apps(), paths.bin(), paths.downloads(), paths.cache(), paths.logs()] {
             fs::create_dir_all(d).unwrap();
         }
         paths
@@ -369,17 +500,17 @@ mod tests {
         let paths = temp_paths("swap");
         let zip = paths.downloads().join("rg.zip");
         make_zip(&zip, &[("ripgrep-1/rg.exe", b"one"), ("ripgrep-1/doc/README", b"r")]);
-        let dir = swap_in(&paths, "ripgrep", |s| extract(&zip, "rg.zip", s)).unwrap();
+        let dir = swap_in(&paths, "ripgrep", Step::Unpack, |s| extract(&zip, "rg.zip", s)).unwrap();
         assert_eq!(dir, paths.app_dir("ripgrep"));
         assert_eq!(find_bins(&dir, &["rg".into()], Os::Windows), [dir.join("rg.exe")]);
         assert_eq!(find_bins(&dir, &["rg".into()], Os::Linux), Vec::<PathBuf>::new());
 
         // An update replaces the folder; a failed one leaves it alone.
         make_zip(&zip, &[("ripgrep-2/rg.exe", b"two")]);
-        swap_in(&paths, "ripgrep", |s| extract(&zip, "rg.zip", s)).unwrap();
+        swap_in(&paths, "ripgrep", Step::Unpack, |s| extract(&zip, "rg.zip", s)).unwrap();
         assert_eq!(fs::read(dir.join("rg.exe")).unwrap(), b"two");
         assert!(!dir.join("doc").exists());
-        assert!(swap_in(&paths, "ripgrep", |_| Err("boom".into())).is_err());
+        assert_eq!(swap_in(&paths, "ripgrep", Step::Unpack, |_| Err("boom".into())).unwrap_err().step, Step::Unpack);
         assert_eq!(fs::read(dir.join("rg.exe")).unwrap(), b"two");
         _ = fs::remove_dir_all(&paths.root);
     }
@@ -399,7 +530,7 @@ mod tests {
         let paths = temp_paths("bundle");
         let zip = paths.downloads().join("r.zip");
         make_zip(&zip, &[("Ruffle.app/Contents/MacOS/ruffle", b"x")]);
-        let dir = swap_in(&paths, "ruffle", |s| extract(&zip, "r.zip", s)).unwrap();
+        let dir = swap_in(&paths, "ruffle", Step::Unpack, |s| extract(&zip, "r.zip", s)).unwrap();
         assert!(dir.join("Ruffle.app/Contents/MacOS/ruffle").exists());
         _ = fs::remove_dir_all(&paths.root);
     }
@@ -450,5 +581,37 @@ mod tests {
         remove_shims(&paths, "uv");
         assert_eq!(fs::read_dir(paths.bin()).unwrap().count(), 0);
         _ = fs::remove_dir_all(&paths.root);
+    }
+
+    /// As in Windows Installer's log of DeckCraft refusing to update a copy installed for everyone.
+    const REFUSED: &str = "=== Verbose logging started: 10/30/2026  21:13:48  Build type: SHIP UNICODE 5.00.10011.00 ===\r\n\
+        ******* Product: C:\\Users\\me\\AppData\\Local\\CraftCraft\\CraftCraft\\data\\downloads\\deckcraft-0.12.0-windows-x64.msi\r\n\
+        Action start 21:13:49: LaunchConditions.\r\n\
+        MSI (s) (F4:E8) [21:13:49:112]: Product: DeckCraft -- This app is already installed for everyone. Choose Everyone to update it.\r\n\
+        This app is already installed for everyone. Choose Everyone to update it.\r\n\
+        Action ended 21:13:49: LaunchConditions. Return value 3.\r\n\
+        MSI (s) (F4:E8) [21:13:49:121]: Product: DeckCraft -- Installation failed.\r\n";
+
+    #[test]
+    fn reads_why_windows_installer_failed() {
+        let utf16: Vec<u8> = [0xff, 0xfe].into_iter().chain(REFUSED.encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let log = decode_log(&utf16);
+        assert_eq!(log, REFUSED);
+        assert_eq!(msi_error(&log).as_deref(), Some("This app is already installed for everyone. Choose Everyone to update it."));
+
+        let privileges = "MSI (s) (10:20) [09:00:00:000]: Product: Old -- Removal completed successfully.\r\n\
+            Error 1925. You do not have sufficient privileges to complete this installation for all users of the machine.\r\n\
+            MSI (s) (10:20) [09:00:01:000]: Product: X -- Installation operation failed.\r\n";
+        assert_eq!(
+            msi_error(privileges).as_deref(),
+            Some("Error 1925. You do not have sufficient privileges to complete this installation for all users of the machine.")
+        );
+        assert_eq!(msi_error("MSI (s) (10:20) [09:00:01:000]: Product: X -- Installation failed.\r\n"), None);
+    }
+
+    #[test]
+    fn steps_name_the_failure() {
+        let f = Failure::new(Step::Installer, "the installation was cancelled");
+        assert_eq!(f.to_string(), "Installer failed: the installation was cancelled");
     }
 }

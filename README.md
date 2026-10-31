@@ -30,10 +30,14 @@ your user only (no admin rights), and opens it. Run it again to update.
 
 Or download an installer from [Releases](https://github.com/haruny/craftcraft/releases/latest):
 
-- **Windows**: `craftcraft-windows-x86_64.msi` (or `-aarch64.msi` for Arm). It installs the same
-  way as the script, for your user only, and opens CraftCraft. Run a newer one to update. The
-  script and the installer can take each other's place: whichever ran last owns the install, and
-  Settings → Apps lists it once.
+- **Windows**: `craftcraft-windows-x86_64.msi` (or `-aarch64.msi` for Arm). It asks who CraftCraft
+  is for: **Only for me** installs it the same way as the script (no admin rights), **Everyone**
+  installs it in `%ProgramFiles%\CraftCraft` and every user's Start menu, after Windows asks for
+  an administrator's approval. Then it offers to open CraftCraft. Run a newer one to update; it
+  has to make the same choice as the copy it replaces (uninstall that copy to switch). Without its
+  window (`msiexec /i … /qn`) it installs for the current user, or for everyone with `ALLUSERS=1`.
+  For a copy that's just for you, the script and the installer can take each other's place:
+  whichever ran last owns the install, and Settings → Apps lists it once.
 - **macOS**: `craftcraft-macos-universal.dmg`. Open it and drag CraftCraft to Applications.
 
 On Windows and macOS, **Settings** also has:
@@ -49,8 +53,11 @@ On Windows and macOS, **Settings** also has:
   back. ⌘Q still quits.
 
 Only one copy runs: opening CraftCraft again brings back the window of the one in the tray. On
-Windows, a copy that wasn't installed by the script (unpacked from the zip, say) adds itself to the
-Start menu.
+Windows, a copy that wasn't installed by the script or the installer (unpacked from the zip, say)
+adds itself to the Start menu.
+
+**Settings → Debug mode** (everywhere) logs what CraftCraft does to `logs/craftcraft.log` in the data
+folder, and keeps downloaded installers and their logs instead of deleting them.
 
 ## The catalog drives everything
 
@@ -104,9 +111,17 @@ version, gets **Open**, and gets **Update** when its project publishes a newer r
 | Command-line and terminal apps (everywhere) | The command on PATH | Running `<command> --version` (hidden, at most 3 seconds) |
 
 Updating an app installed by its own installer runs the new release's installer, which upgrades it
-in place (MSI packages run with `/passive`). A command-line app installed some other way (winget,
-cargo, a script) can't be replaced, so **Install latest** puts an up-to-date copy in the launcher's
-folder instead. **Uninstall…** runs the app's own uninstaller.
+in place. MSI packages run with `/passive`, and with `ALLUSERS=1` when the installed copy is for
+everyone, so Windows asks for an administrator's approval; Windows Installer's own records say which
+copies those are, since it lists copies installed just for one user under HKLM too. A command-line
+app installed some other way (winget, cargo, a script) can't be replaced, so **Install latest**
+puts an up-to-date copy in the launcher's folder instead. **Uninstall…** runs the app's own
+uninstaller.
+
+When an install, update, uninstall or **Open** fails, the card says which step failed and why, for
+example *Installer failed: This app is already installed for everyone…*, with all of it on hover.
+For an MSI package the reason comes from Windows Installer's log, which **⋯ → Installer log** opens;
+**⋯ → Copy error** copies it all.
 
 `craftcraft --detect <catalog.json>` prints what the launcher finds.
 
@@ -129,7 +144,10 @@ terminal with the folder already on its PATH.
 
 Everything lives in one data folder: `%LOCALAPPDATA%\CraftCraft\CraftCraft\data` on Windows,
 `~/Library/Application Support/io.CraftCraft.CraftCraft` on macOS, `~/.local/share/craftcraft` on
-Linux, or `$CRAFTCRAFT_HOME` when set.
+Linux, or `$CRAFTCRAFT_HOME` when set. Nothing is downloaded until you click **Install** or
+**Update**. On Windows, installers are deleted once they've run and an MSI's log once it succeeds;
+on macOS and Linux, where the system installer is still open when the launcher hands over, they go
+after a week. Debug mode keeps them all.
 
 ## Build and run
 

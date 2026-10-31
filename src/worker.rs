@@ -7,12 +7,13 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use crate::catalog::{App, Platform};
+use crate::debug;
 use crate::detect::{self, Detected};
 use crate::feed::{self, FeedResult};
 use crate::github::{Lookup, Release, Releases};
 use crate::http::Http;
 use crate::index::{self, Index};
-use crate::install::{self, Stage};
+use crate::install::{self, Failure, Stage};
 use crate::paths::Paths;
 use crate::state::Installed;
 
@@ -29,7 +30,7 @@ pub enum Event {
     },
     Installed {
         id: String,
-        result: Result<Installed, String>,
+        result: Result<Installed, Failure>,
     },
     Uninstalled {
         id: String,
@@ -105,6 +106,7 @@ impl Worker {
         let ctx = self.ctx.clone();
         self.spawn("install", move |tx, http, paths, _| {
             let id = app.id.clone();
+            debug::log(format_args!("{id}: installing {} for {}", release.tag, if for_everyone { "everyone" } else { "this user" }));
             let mut last = Instant::now() - Duration::from_secs(1);
             let result = install::install(paths, http, &app, &release, platform, for_everyone, |stage| {
                 // Downloads report every chunk; the UI only needs a few updates a second.
@@ -115,6 +117,12 @@ impl Worker {
                 _ = tx.send(Event::Progress { id: id.clone(), stage });
                 ctx.request_repaint();
             });
+            match &result {
+                Ok(installed) => debug::log(format_args!("{id}: installed {}", installed.tag)),
+                Err(failure) => {
+                    debug::log(format_args!("{id}: {failure}{}", failure.log.as_ref().map(|l| format!(" (log: {})", l.display())).unwrap_or_default()))
+                }
+            }
             _ = tx.send(Event::Installed { id, result });
         });
     }
@@ -135,7 +143,22 @@ impl Worker {
     /// Looks for the catalog's apps already on this computer.
     pub fn detect(&self, apps: Vec<App>, platform: Platform) {
         self.spawn("detect", move |tx, _, paths, _| {
-            _ = tx.send(Event::Detected(detect::detect_all(&apps, platform, paths)));
+            let found = detect::detect_all(&apps, platform, paths);
+            if debug::enabled() {
+                let mut ids: Vec<_> = found.keys().collect();
+                ids.sort();
+                for id in ids {
+                    let d = &found[id];
+                    let exe = d.exe.as_ref().map_or_else(|| "?".into(), |e| e.display().to_string());
+                    let scope = if d.for_everyone { "everyone" } else { "this user" };
+                    debug::log(format_args!(
+                        "found {id} {} for {scope} at {exe}, uninstall: {}",
+                        d.version.as_deref().unwrap_or("?"),
+                        d.uninstall.as_deref().unwrap_or("-")
+                    ));
+                }
+            }
+            _ = tx.send(Event::Detected(found));
         });
     }
 

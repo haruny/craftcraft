@@ -108,6 +108,21 @@ pub fn reveal(path: &Path) {
     }
 }
 
+/// Opens a file (a log, say) in the app the system uses for it.
+pub fn open_file(path: &Path) {
+    if let Err(e) = open::that_detached(path) {
+        eprintln!("opening {}: {e}", path.display());
+    }
+}
+
+/// The commands with a launcher in the `bin` folder, by name.
+pub fn commands(paths: &Paths) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(paths.bin()) else { return Vec::new() };
+    let mut names: Vec<String> = entries.filter_map(Result::ok).filter_map(|e| Some(e.path().file_stem()?.to_string_lossy().into_owned())).collect();
+    names.sort();
+    names
+}
+
 /// Opens a web link from the catalog in the browser, if it's a plain https link.
 pub fn open_url(url: &str) {
     let safe = url.starts_with("https://") && !url.chars().any(|c| c.is_control() || c.is_whitespace() || "\"'`|&;<>^%$!(){}[]".contains(c));
@@ -282,15 +297,18 @@ pub fn set_start_on_logon(on: bool) -> Result<(), String> {
 }
 
 /// Adds the launcher to the Start menu if it isn't there, as the install script does, for a copy
-/// installed some other way (unpacked from the zip, say). Debug builds leave it alone.
+/// installed some other way (unpacked from the zip, say). Debug builds leave it alone, and so does
+/// a copy the installer put in everyone's Start menu.
 #[cfg(windows)]
 pub fn add_to_start_menu() {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let (Some(dirs), Ok(exe)) = (directories::BaseDirs::new(), std::env::current_exe()) else { return };
-    let link = dirs.data_dir().join(r"Microsoft\Windows\Start Menu\Programs\CraftCraft.lnk");
-    if cfg!(debug_assertions) || link.exists() {
+    let programs = r"Microsoft\Windows\Start Menu\Programs\CraftCraft.lnk";
+    let link = dirs.data_dir().join(programs);
+    let everyones = std::env::var_os("ProgramData").map(|d| PathBuf::from(d).join(programs));
+    if cfg!(debug_assertions) || link.exists() || everyones.is_some_and(|l| l.exists()) {
         return;
     }
     let quote = |p: &Path| p.to_string_lossy().replace('\'', "''");

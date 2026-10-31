@@ -1,6 +1,6 @@
 //! Where the launcher keeps things.
 //!
-//! Everything lives in one data folder (`%LOCALAPPDATA%\CraftCraft\data` on Windows,
+//! Everything lives in one data folder (`%LOCALAPPDATA%\CraftCraft\CraftCraft\data` on Windows,
 //! `~/Library/Application Support/io.CraftCraft.CraftCraft` on macOS, `~/.local/share/craftcraft`
 //! on Linux), or in `$CRAFTCRAFT_HOME` when that is set.
 
@@ -19,7 +19,7 @@ impl Paths {
             _ => directories::ProjectDirs::from("io", "CraftCraft", "CraftCraft").ok_or("couldn't find a home folder")?.data_local_dir().to_path_buf(),
         };
         let paths = Self { root };
-        for dir in [paths.apps(), paths.bin(), paths.downloads(), paths.cache()] {
+        for dir in [paths.apps(), paths.bin(), paths.downloads(), paths.cache(), paths.logs()] {
             std::fs::create_dir_all(&dir).map_err(|e| format!("couldn't create {}: {e}", dir.display()))?;
         }
         Ok(paths)
@@ -45,6 +45,11 @@ impl Paths {
 
     pub fn cache(&self) -> PathBuf {
         self.root.join("cache")
+    }
+
+    /// System installers' logs, and the launcher's own in debug mode.
+    pub fn logs(&self) -> PathBuf {
+        self.root.join("logs")
     }
 
     pub fn state_file(&self) -> PathBuf {

@@ -256,6 +256,26 @@ jobs:
           msiexec /x $msi /qn
           if ((Test-Path $exe) -or (Test-Path $link) -or (listed).Count) { throw 'uninstalling the .msi left CraftCraft behind' }
           if (Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name CraftCraft -ErrorAction SilentlyContinue) { throw 'uninstalling the .msi left it starting at sign-in' }
+          # For everyone (as the dialog's Everyone does; the runner is an administrator, so Windows
+          # doesn't ask): Program Files and everyone's Start menu. A newer installer won't make the
+          # other choice over an installed copy, either way round. Settings > Apps removes it by
+          # product code.
+          $exeAll = "$env:ProgramFiles\CraftCraft\craftcraft.exe"
+          $linkAll = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\CraftCraft.lnk"
+          $update = "$env:RUNNER_TEMP\update\craftcraft-windows-x86_64.msi"
+          function refused { (Start-Process msiexec.exe -ArgumentList $args -Wait -PassThru).ExitCode -ne 0 }
+          function products { (New-Object -ComObject WindowsInstaller.Installer).RelatedProducts('{8241B415-3A84-4BFB-94C1-7F03F92257D9}') }
+          msiexec /i $msi /qn
+          if (-not (refused /i $update /qn ALLUSERS=1) -or (Test-Path $exeAll)) { throw 'installing for everyone over a copy for this user was not refused' }
+          foreach ($code in (products)) { msiexec /x $code /qn }
+          msiexec /i $msi /qn ALLUSERS=1
+          if (-not (Test-Path $exeAll) -or -not (Test-Path $linkAll) -or (Test-Path $exe) -or (Test-Path $link)) { throw 'installing for everyone put CraftCraft in the wrong place' }
+          if ((Get-AuthenticodeSignature $exeAll).Status -ne 'Valid') { throw 'the exe installed for everyone is not signed' }
+          if (-not (refused /i $update /qn) -or (Test-Path $exe)) { throw 'installing for this user over a copy for everyone was not refused' }
+          msiexec /i $update /qn ALLUSERS=1
+          if ((listed).Count -ne 1) { throw "after updating the copy for everyone, Settings > Apps lists CraftCraft $((listed).Count) times" }
+          foreach ($code in (products)) { msiexec /x $code /qn }
+          if ((Test-Path $exeAll) -or (Test-Path $linkAll) -or (listed).Count) { throw 'uninstalling the copy for everyone left CraftCraft behind' }
       - uses: actions/upload-artifact@v4
         with:
           name: windows-signed

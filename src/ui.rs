@@ -11,12 +11,12 @@ use crate::detect::Detected;
 use crate::feed::{self, FeedResult};
 use crate::github::{Lookup, Release};
 use crate::index::{self, Index};
-use crate::install::{self, Stage};
+use crate::install::{self, Failure, Stage, Step};
 use crate::paths::Paths;
 use crate::state::{Installed, MAX_CHECK_HOURS, Sort, State};
 use crate::theme::{self, Palette};
 use crate::worker::{Event, Worker};
-use crate::{now, system, version};
+use crate::{debug, now, system, version};
 
 const SIDEBAR_WIDTH: f32 = 236.0;
 const CARD_MIN_WIDTH: f32 = 320.0;
@@ -77,7 +77,8 @@ pub struct Launcher {
     /// Every app's latest release and stars, from releases.json.
     index: Index,
     busy: HashMap<String, Busy>,
-    app_errors: HashMap<String, String>,
+    /// What went wrong last for an app, shown on its card until it's tried again.
+    app_errors: HashMap<String, Failure>,
     /// Apps waiting their turn after Update all. They go one at a time: Windows can't run two
     /// installers at once.
     update_queue: VecDeque<String>,
@@ -113,9 +114,11 @@ pub struct Launcher {
 impl Launcher {
     pub fn new(cc: &eframe::CreationContext<'_>, paths: Paths) -> Self {
         theme::install(&cc.egui_ctx);
+        let state = State::load(&paths);
+        debug::init(&paths.logs(), state.settings.debug);
+        debug::log(format_args!("started, data folder {}", paths.root.display()));
         install::tidy(&paths);
         let worker = Worker::new(cc.egui_ctx.clone(), paths.clone());
-        let state = State::load(&paths);
         let release_index = index::cached(&paths);
         let catalog = feed::cached(&paths);
         let mut releases = HashMap::new();
@@ -368,7 +371,10 @@ impl Launcher {
                         self.detect();
                         self.check_releases();
                     }
-                    FeedResult::Failed(e) => self.catalog_error = Some(e),
+                    FeedResult::Failed(e) => {
+                        debug::log(format_args!("catalog check failed: {e}"));
+                        self.catalog_error = Some(e);
+                    }
                 }
             }
             Event::Release { id, lookup } => {
@@ -413,7 +419,8 @@ impl Launcher {
                         self.state.save(&self.paths);
                     }
                     Err(e) => {
-                        self.app_errors.insert(id, e);
+                        debug::log(format_args!("{id}: uninstall failed: {e}"));
+                        self.app_errors.insert(id, Failure::new(Step::Uninstall, e));
                     }
                 }
                 self.detect();
@@ -938,7 +945,7 @@ impl Launcher {
             Status::Installed { version, latest, external } => {
                 let current = if latest.is_some() && version.is_some() { " · up to date" } else { "" };
                 let hint = if external {
-                    Some("Found on this computer: installed outside CraftCraft.".to_string())
+                    Some(format!("Found on this computer: installed outside CraftCraft{}.", self.scope_note(app, platform)))
                 } else if installed.as_ref().is_some_and(|i| !i.verified) {
                     Some("This download had no published SHA-256, so it couldn't be verified.".to_string())
                 } else {
@@ -948,16 +955,14 @@ impl Launcher {
             }
             Status::Update { from, to, .. } => (format!("Update:{} → {}", shown(&from), version::display(&to.tag)), p.accent, None),
         };
-        if let Some(e) = self.app_errors.get(&app.id) {
-            ui.label(RichText::new("⚠ Failed").small().color(ui.visuals().error_fg_color)).on_hover_text(e);
-        } else {
-            let label = ui.label(RichText::new(status_text).small().color(status_color));
-            if let Some(hint) = hint {
-                label.on_hover_text(hint);
-            }
-        }
+        // Or where it went wrong last time: "Installer failed: …".
+        let (status_text, status_color, hint) = match self.app_errors.get(&app.id) {
+            Some(failure) => (format!("⚠ {failure}"), ui.visuals().error_fg_color, Some(failure_details(failure))),
+            None => (status_text, status_color, hint),
+        };
 
-        // Right: what you can do.
+        // Right: what you can do. It goes first, so the status on the left gets the room that's
+        // left, cut short if need be (the whole of it is on hover).
         let open_label = if app.kind == Kind::Gui { "Open" } else { "Open in terminal" };
         let (mut install, mut open) = (None, false);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -973,6 +978,10 @@ impl Launcher {
                     let button = primary(ui, p, if separate { "Install latest" } else { "Update" });
                     let button = if separate {
                         button.on_hover_text("This copy was installed outside CraftCraft (winget, cargo…). CraftCraft will install its own, up-to-date copy.")
+                    } else if self.detected.get(&app.id).is_some_and(|d| d.for_everyone) {
+                        button.on_hover_text(
+                            "This copy is installed for everyone on this computer, so Windows asks for an administrator's approval to update it.",
+                        )
                     } else {
                         button
                     };
@@ -984,6 +993,13 @@ impl Launcher {
                 Status::Installed { .. } => open = ui.button(open_label).clicked(),
                 Status::Unknown | Status::NoBuild => {}
             }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                let label = egui::Label::new(RichText::new(status_text).small().color(status_color)).truncate();
+                let label = ui.add(label.show_tooltip_when_elided(hint.is_none()));
+                if let Some(hint) = hint {
+                    label.on_hover_text(hint);
+                }
+            });
         });
         if let Some(release) = install {
             self.start_install(app, release, platform);
@@ -993,8 +1009,33 @@ impl Launcher {
         }
     }
 
+    /// Who a copy found in Windows' list of installed programs is for, to add to its description.
+    fn scope_note(&self, app: &App, platform: Platform) -> &'static str {
+        match self.detected.get(&app.id) {
+            Some(d) if platform.os == crate::catalog::Os::Windows && d.uninstall.is_some() => {
+                if d.for_everyone {
+                    ", for everyone"
+                } else {
+                    ", just for you"
+                }
+            }
+            _ => "",
+        }
+    }
+
     fn more_menu(&mut self, ui: &mut egui::Ui, app: &App, installed: Option<&Installed>, platform: Platform) {
         ui.set_min_width(180.0);
+        if let Some(failure) = self.app_errors.get(&app.id) {
+            if let Some(log) = &failure.log
+                && ui.button("Installer log").on_hover_text("Windows Installer's own record of what happened.").clicked()
+            {
+                system::open_file(log);
+            }
+            if ui.button("Copy error").clicked() {
+                ui.ctx().copy_text(failure_details(failure));
+            }
+            ui.separator();
+        }
         if let Some(home) = &app.homepage
             && ui.button("Website").clicked()
         {
@@ -1084,7 +1125,8 @@ impl Launcher {
                 self.app_errors.remove(&app.id);
             }
             Err(e) => {
-                self.app_errors.insert(app.id.clone(), e);
+                debug::log(format_args!("{}: couldn't open: {e}", app.id));
+                self.app_errors.insert(app.id.clone(), Failure::new(Step::Open, e));
             }
         }
     }
@@ -1147,13 +1189,26 @@ impl Launcher {
                 }
 
                 ui.label(RichText::new("Command-line apps").family(theme::strong()));
-                ui.label(RichText::new("Terminal and command-line apps get a launcher in this folder:").small().color(p.muted));
+                ui.label(
+                    RichText::new(
+                        "When you install a terminal or command-line app (ripgrep, uv…), CraftCraft puts a launcher for each of its commands in this folder:",
+                    )
+                    .small()
+                    .color(p.muted),
+                );
                 ui.horizontal(|ui| {
                     ui.monospace(self.paths.bin().display().to_string());
                     if ui.small_button("Show").clicked() {
                         system::reveal(&self.paths.bin());
                     }
                 });
+                let commands = system::commands(&self.paths);
+                let has = if commands.is_empty() {
+                    "Empty for now: no command-line apps installed yet.".to_string()
+                } else {
+                    format!("Commands: {}", commands.join(", "))
+                };
+                ui.label(RichText::new(has).small().color(p.subtle));
                 if system::bin_on_path(&self.paths) {
                     ui.label(RichText::new("✔ It's on your PATH, so the commands work in any terminal.").small().color(p.good));
                 } else {
@@ -1178,6 +1233,28 @@ impl Launcher {
                     ui.monospace(self.paths.root.display().to_string());
                     if ui.small_button("Show").clicked() {
                         system::reveal(&self.paths.root);
+                    }
+                });
+                ui.label(
+                    RichText::new("Apps are downloaded only when you install or update them, and their installers are cleaned up afterwards.")
+                        .small()
+                        .color(p.subtle),
+                );
+                ui.add_space(14.0);
+
+                ui.label(RichText::new("Troubleshooting").family(theme::strong()));
+                if ui.checkbox(&mut self.state.settings.debug, "Debug mode").changed() {
+                    debug::set(self.state.settings.debug);
+                }
+                ui.label(
+                    RichText::new("Logs what CraftCraft does to craftcraft.log, and keeps downloaded installers and their logs instead of deleting them.")
+                        .small()
+                        .color(p.subtle),
+                );
+                ui.horizontal(|ui| {
+                    ui.monospace(self.paths.logs().display().to_string());
+                    if ui.small_button("Show").clicked() {
+                        system::reveal(&self.paths.logs());
                     }
                 });
             });
@@ -1219,6 +1296,18 @@ fn nav_item(ui: &mut egui::Ui, p: Palette, label: &str, count: usize, selected: 
         }
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// All of a failure, for its hover text and Copy error.
+fn failure_details(failure: &Failure) -> String {
+    let mut text = failure.to_string();
+    if let Some(log) = &failure.log {
+        text.push_str(&format!("\n\nWindows Installer's log: {} (⋯ → Installer log)", log.display()));
+    }
+    if !debug::enabled() {
+        text.push_str("\n\nDebug mode, in Settings, logs more.");
+    }
+    text
 }
 
 /// Whether updating means installing a separate copy. An installer upgrades a system install in

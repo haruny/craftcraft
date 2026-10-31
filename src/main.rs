@@ -6,6 +6,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod catalog;
+mod debug;
 mod detect;
 mod feed;
 mod github;
@@ -149,7 +150,8 @@ fn detect(path: Option<&str>) -> std::process::ExitCode {
     for app in &parsed.catalog.apps {
         if let Some(d) = found.get(&app.id) {
             let exe = d.exe.as_ref().map_or_else(|| "?".into(), |e| e.display().to_string());
-            println!("{:<12} {:<10} {exe}", app.id, d.version.as_deref().unwrap_or("?"));
+            let scope = if d.for_everyone { "everyone" } else { "" };
+            println!("{:<12} {:<10} {scope:<9} {exe}", app.id, d.version.as_deref().unwrap_or("?"));
         }
     }
     println!("{} of {} apps found", found.len(), parsed.catalog.apps.len());

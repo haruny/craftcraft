@@ -61,8 +61,12 @@
 
         # Installed with the .msi before: remove that copy first, so Settings > Apps lists CraftCraft
         # once. KEEPSETTINGS keeps it starting at sign-in, since this copy goes in the same place.
+        # A copy installed for everyone isn't this user's to remove (nor removable without admin).
         $installer = New-Object -ComObject WindowsInstaller.Installer
         foreach ($code in $installer.RelatedProducts('{8241B415-3A84-4BFB-94C1-7F03F92257D9}')) {
+            if ($installer.ProductInfo($code, 'AssignmentType') -eq '1') {
+                throw "CraftCraft is installed for everyone on this computer, by its installer. Update it with the installer (craftcraft-windows-$arch.msi from https://github.com/$repo/releases), or uninstall it in Settings > Apps first."
+            }
             $p = Start-Process msiexec.exe -ArgumentList "/x $code /qn KEEPSETTINGS=1" -Wait -PassThru
             if ($p.ExitCode -ne 0) { throw "Couldn't remove the copy of CraftCraft installed by its installer (msiexec stopped with code $($p.ExitCode))." }
         }

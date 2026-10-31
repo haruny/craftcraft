@@ -34,13 +34,15 @@ pub struct Settings {
     /// Windows: closing the window leaves the launcher running in the tray.
     pub close_to_tray: bool,
     pub sort: Sort,
+    /// Keep a log, installers and their logs (see `debug`).
+    pub debug: bool,
 }
 
 pub const MAX_CHECK_HOURS: u32 = 168;
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { auto_check: true, check_hours: 8, close_to_tray: true, sort: Sort::Featured }
+        Self { auto_check: true, check_hours: 8, close_to_tray: true, sort: Sort::Featured, debug: false }
     }
 }
 
