@@ -1562,9 +1562,9 @@ impl Launcher {
     }
 
     fn settings(&mut self, ctx: &egui::Context, p: Palette) {
-        let mut open = self.show_settings;
         // Room for the title bar and margins, so the close button stays on screen in a short window.
         let body_height = (ctx.content_rect().height() - 120.0).max(120.0);
+        let mut open = self.show_settings;
         egui::Window::new(RichText::new(t("settings.title")).family(theme::strong()).size(16.0))
             .open(&mut open)
             .collapsible(false)
@@ -1604,7 +1604,7 @@ impl Launcher {
                     });
                     note(ui, p, "settings.auto_check_note");
                     ui.add_space(14.0);
-    
+
                     #[cfg(tray)]
                     {
                         // What the system calls the tray (the menu bar on macOS), and signing in.
@@ -1622,7 +1622,7 @@ impl Launcher {
                         note(ui, p, &format!("settings.close_to_tray_note{mac}"));
                         ui.add_space(14.0);
                     }
-    
+
                     heading(ui, "settings.cli");
                     para(ui, &i18n::text("settings.cli_note", &[]), |t| t.small().color(p.muted));
                     ui.horizontal(|ui| {
@@ -1656,7 +1656,7 @@ impl Launcher {
                         }
                     }
                     ui.add_space(14.0);
-    
+
                     heading(ui, "settings.data");
                     ui.horizontal(|ui| {
                         ui.monospace(self.paths.root.display().to_string());
@@ -1666,7 +1666,7 @@ impl Launcher {
                     });
                     note(ui, p, "settings.data_note");
                     ui.add_space(14.0);
-    
+
                     if telemetry::available() || telemetry::opted_out_by_environment() {
                         heading(ui, "settings.privacy");
                         let blocked = telemetry::opted_out_by_environment();
@@ -1680,14 +1680,14 @@ impl Launcher {
                         }
                         ui.add_space(14.0);
                     }
-    
+
                     heading(ui, "settings.support");
                     note(ui, p, "settings.support_note");
                     if ui.link(t("settings.sponsor")).clicked() {
                         system::open_url(SPONSOR);
                     }
                     ui.add_space(14.0);
-    
+
                     heading(ui, "settings.troubleshooting");
                     if ui.checkbox(&mut self.state.settings.debug, t("settings.debug")).changed() {
                         debug::set(self.state.settings.debug);
