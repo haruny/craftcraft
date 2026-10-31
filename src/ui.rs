@@ -23,6 +23,9 @@ const CARD_MIN_WIDTH: f32 = 320.0;
 const CARD_HEIGHT: f32 = 208.0;
 const GAP: f32 = 14.0;
 const PRIVACY_STATEMENT: &str = "https://github.com/haruny/craftcraft/blob/main/Privacy_Statement.md";
+/// The bug report form, `.github/ISSUE_TEMPLATE/bug_report.yml`; query parameters named after its
+/// field ids fill those fields in.
+const BUG_REPORT: &str = "https://github.com/haruny/craftcraft/issues/new?template=bug_report.yml";
 /// After a failed catalog check, wait this long before trying again.
 const RETRY_AFTER: Duration = Duration::from_secs(15 * 60);
 
@@ -502,6 +505,38 @@ impl Launcher {
         matches!(self.status(app), Status::Installed { .. } | Status::Update { .. })
     }
 
+    /// The bug report form with what the launcher knows already filled in. The user sees it all
+    /// on GitHub before anything is sent.
+    fn bug_report_url(&self) -> String {
+        let os = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        let mut details = vec![
+            format!("CraftCraft: {}", env!("CARGO_PKG_VERSION")),
+            format!("System: {os}"),
+            format!("Catalog: {}", self.catalog.as_ref().map_or("not loaded".to_string(), |c| format!("updated {}", c.updated))),
+            format!("Debug mode: {}", if debug::enabled() { "on" } else { "off" }),
+            format!(
+                "Automatic checks: {}",
+                if self.state.settings.auto_check { format!("every {} h", self.state.settings.check_hours) } else { "off".to_string() }
+            ),
+        ];
+        if let Some(e) = &self.catalog_error {
+            details.push(format!("Catalog error: {e}"));
+        }
+        if self.worker.releases.rate_limited_until().is_some() {
+            details.push("GitHub rate limit reached".to_string());
+        }
+        details.push(format!("Installed through CraftCraft: {}", if self.state.installed.is_empty() { "none" } else { "" }));
+        for (id, app) in &self.state.installed {
+            details.push(format!("  {id} {} ({:?})", app.tag, app.method));
+        }
+        format!(
+            "{BUG_REPORT}&version={}&os={}&environment={}",
+            url_encode(env!("CARGO_PKG_VERSION")),
+            url_encode(&os),
+            url_encode(details.join("\n").trim_end())
+        )
+    }
+
     fn update_count(&self) -> usize {
         self.catalog.as_ref().map_or(0, |c| c.apps.iter().filter(|a| matches!(self.status(a), Status::Update { .. })).count())
     }
@@ -696,6 +731,10 @@ impl Launcher {
                     .on_hover_text("Set GITHUB_TOKEN to a GitHub token to raise the limit from 60 to 5,000 requests an hour.");
             }
             ui.add_space(6.0);
+            // The layout runs bottom up, so this sits under Settings.
+            if nav_item(ui, p, "🐛  Report a bug", 0, false, false) {
+                system::open_own_url(&self.bug_report_url());
+            }
             if nav_item(ui, p, "⚙  Settings", 0, self.show_settings, false) {
                 self.show_settings = !self.show_settings;
             }
@@ -1328,6 +1367,19 @@ fn section_label(ui: &mut egui::Ui, p: Palette, text: &str) {
     ui.add_space(2.0);
     ui.label(RichText::new(text.to_uppercase()).font(FontId::monospace(10.5)).color(p.subtle).extra_letter_spacing(1.2));
     ui.add_space(2.0);
+}
+
+/// Percent-encodes `s` for a URL query value.
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// A sidebar row; returns whether it was clicked.

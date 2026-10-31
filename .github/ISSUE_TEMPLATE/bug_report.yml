@@ -1,0 +1,91 @@
+name: Report a bug
+description: Something in CraftCraft doesn't work as it should.
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. **Report a bug** in the CraftCraft sidebar fills in the version, system and installed apps for you.
+        A bug in an app CraftCraft installs (rather than in CraftCraft itself) belongs on that app's own repository.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What went wrong, and any error message CraftCraft showed (copy it exactly).
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open CraftCraft
+        2. Click Install on …
+        3. …
+    validations:
+      required: true
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often does it happen?
+      options:
+        - Every time
+        - Sometimes
+        - Once
+    validations:
+      required: true
+  - type: input
+    id: app
+    attributes:
+      label: App involved
+      description: The catalog app you were installing, updating, opening or removing, if any.
+      placeholder: e.g. ripgrep
+  - type: input
+    id: version
+    attributes:
+      label: CraftCraft version
+      placeholder: e.g. 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: Add the version, e.g. Windows 11 24H2, macOS 15.1, Ubuntu 24.04.
+      placeholder: e.g. windows-x86_64, Windows 11 24H2
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: CraftCraft details
+      description: Filled in by CraftCraft. Remove anything you'd rather not share.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log
+      description: |
+        Turn on **Debug mode** in Settings, make the bug happen again, then paste the end of `logs/craftcraft.log` from the CraftCraft data folder (or drag the file here).
+        Installer logs from the same folder help with install problems.
+      render: text
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: Drag images here if they help show the problem.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you send
+      options:
+        - label: I searched the existing issues and this one isn't there yet.
+          required: true
+        - label: I'm on the latest CraftCraft release, or said above that I'm not.

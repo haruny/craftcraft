@@ -135,6 +135,14 @@ pub fn open_url(url: &str) {
     }
 }
 
+/// Opens a URL the launcher built itself, whose query values are percent-encoded, so it may hold
+/// the `&` and `%` that [`open_url`] turns away from catalog URLs.
+pub fn open_own_url(url: &str) {
+    if let Err(e) = open::that_detached(url) {
+        eprintln!("opening {url}: {e}");
+    }
+}
+
 /// Runs an installed program's own uninstaller (from Windows' list of installed programs) and
 /// waits for it. Windows Installer products are removed with `msiexec /x {product}`.
 pub fn run_uninstaller(command: &str) -> Result<(), String> {
