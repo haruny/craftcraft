@@ -272,6 +272,11 @@ src/ui.rs        the window
 src/theme.rs     colours, fonts and widget styling
 ```
 
+## Sponsor
+
+CraftCraft is free and built in my spare time. If it saves you a license fee or two, you can
+support it through [GitHub Sponsors](https://github.com/sponsors/haruny).
+
 ## License
 
 MIT OR Apache-2.0. The bundled Geist fonts (`assets/fonts`) are under the SIL Open Font License
