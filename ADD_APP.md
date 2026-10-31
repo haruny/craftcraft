@@ -104,6 +104,10 @@ example `GITHUB_TOKEN=$(gh auth token)`) avoids GitHub's rate limit.
 Commit only the change to `catalog/catalog.json`, on a new branch of a fork, and open a pull
 request to `haruny/craftcraft`. Title it `Add <name>`. In the description, fill in the
 checklist from `.github/pull_request_template.md`. State which paid products it replaces, and
-anything you guessed (most often the `launch` path).
+anything you guessed (most often the `launch` path). Delete the template's "Changing CraftCraft"
+section.
+
+Leave the "no unverified AI output" box unticked: only the person can confirm it. Ask them to read
+the entry and the description, and to tick the box themselves once they have.
 
 If you can't open pull requests, give the person the JSON entry and these instructions instead.
