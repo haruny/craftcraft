@@ -1270,6 +1270,8 @@ impl Launcher {
     }
 
     fn settings(&mut self, ctx: &egui::Context, p: Palette) {
+        // Room for the title bar and margins, so the close button stays on screen in a short window.
+        let body_height = (ctx.content_rect().height() - 120.0).max(120.0);
         let mut open = self.show_settings;
         egui::Window::new(RichText::new(t("settings.title")).family(theme::strong()).size(16.0))
             .open(&mut open)
@@ -1279,120 +1281,128 @@ impl Launcher {
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .frame(Frame::window(&ctx.global_style()).inner_margin(Margin::same(20)))
             .show(ctx, |ui| {
-                self.language(ui, p);
-                ui.add_space(14.0);
-
-                let settings = &mut self.state.settings;
-                // A checkbox, the number of hours, and the rest of the sentence.
-                let sentence = i18n::plural_text("settings.auto_check", u64::from(settings.check_hours), &[]);
-                let (before, after) = sentence.split_once("{hours}").unwrap_or((&sentence, ""));
-                let (before, after) = (i18n::display(before.trim()), i18n::display(after.trim()));
-                // Right to left, the sentence starts at the right: the same pieces, the other way round.
-                let rtl = i18n::is_rtl(&sentence);
-                ui.horizontal(|ui| {
-                    if rtl && !after.is_empty() {
-                        ui.label(&after);
-                    }
-                    if rtl {
-                        ui.add_enabled(settings.auto_check, egui::DragValue::new(&mut settings.check_hours).range(1..=MAX_CHECK_HOURS).speed(0.2));
-                    }
-                    ui.checkbox(&mut settings.auto_check, &before);
-                    if !rtl {
-                        ui.add_enabled(settings.auto_check, egui::DragValue::new(&mut settings.check_hours).range(1..=MAX_CHECK_HOURS).speed(0.2));
-                    }
-                    if !rtl && !after.is_empty() {
-                        ui.label(&after);
-                    }
-                });
-                note(ui, p, "settings.auto_check_note");
-                ui.add_space(14.0);
-
-                #[cfg(tray)]
-                {
-                    // What the system calls the tray (the menu bar on macOS), and signing in.
-                    let mac = if cfg!(target_os = "macos") { "_macos" } else { "" };
-                    heading(ui, "settings.background");
-                    let mut on = self.start_on_logon;
-                    if ui.checkbox(&mut on, t("settings.start_on_logon")).changed() {
-                        match system::set_start_on_logon(on) {
-                            Ok(()) => self.start_on_logon = on,
-                            Err(e) => self.flash(tf("flash.change_failed", &[("error", &e)])),
-                        }
-                    }
-                    note(ui, p, &format!("settings.start_on_logon_note{mac}"));
-                    ui.add_enabled(self.tray.is_some(), egui::Checkbox::new(&mut self.state.settings.close_to_tray, t(&format!("settings.close_to_tray{mac}"))));
-                    note(ui, p, &format!("settings.close_to_tray_note{mac}"));
+                egui::ScrollArea::vertical().max_height(body_height).show(ui, |ui| {
+                    // Tighter than the rest of the app: a setting and its note read as one.
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    ui.spacing_mut().interact_size.y = 24.0;
+                    self.language(ui, p);
                     ui.add_space(14.0);
-                }
 
-                heading(ui, "settings.cli");
-                para(ui, &i18n::text("settings.cli_note", &[]), |t| t.small().color(p.muted));
-                ui.horizontal(|ui| {
-                    ui.monospace(self.paths.bin().display().to_string());
-                    if ui.small_button(t("settings.show")).clicked() {
-                        system::reveal(&self.paths.bin());
-                    }
-                });
-                let commands = system::commands(&self.paths);
-                let has = if commands.is_empty() {
-                    i18n::text("settings.cli_empty", &[])
-                } else {
-                    i18n::text("settings.cli_commands", &[("commands", &commands.join(", "))])
-                };
-                para(ui, &has, |t| t.small().color(p.subtle));
-                if system::bin_on_path(&self.paths) {
-                    para(ui, &i18n::text("settings.cli_on_path", &[]), |t| t.small().color(p.good));
-                } else {
-                    #[cfg(windows)]
-                    if ui.button(t("settings.cli_add_path")).clicked() {
-                        match system::add_bin_to_path(&self.paths) {
-                            Ok(()) => self.flash(t("flash.path_added")),
-                            Err(e) => self.flash(tf("flash.path_failed", &[("error", &e)])),
+                    let settings = &mut self.state.settings;
+                    // A checkbox, the number of hours, and the rest of the sentence.
+                    let sentence = i18n::plural_text("settings.auto_check", u64::from(settings.check_hours), &[]);
+                    let (before, after) = sentence.split_once("{hours}").unwrap_or((&sentence, ""));
+                    let (before, after) = (i18n::display(before.trim()), i18n::display(after.trim()));
+                    // Right to left, the sentence starts at the right: the same pieces, the other way round.
+                    let rtl = i18n::is_rtl(&sentence);
+                    ui.horizontal(|ui| {
+                        if rtl && !after.is_empty() {
+                            ui.label(&after);
                         }
-                    }
-                    #[cfg(not(windows))]
+                        if rtl {
+                            ui.add_enabled(settings.auto_check, egui::DragValue::new(&mut settings.check_hours).range(1..=MAX_CHECK_HOURS).speed(0.2));
+                        }
+                        ui.checkbox(&mut settings.auto_check, &before);
+                        if !rtl {
+                            ui.add_enabled(settings.auto_check, egui::DragValue::new(&mut settings.check_hours).range(1..=MAX_CHECK_HOURS).speed(0.2));
+                        }
+                        if !rtl && !after.is_empty() {
+                            ui.label(&after);
+                        }
+                    });
+                    note(ui, p, "settings.auto_check_note");
+                    ui.add_space(14.0);
+
+                    #[cfg(tray)]
                     {
-                        para(ui, &i18n::text("settings.cli_profile", &[]), |t| t.small().color(p.muted));
-                        let mut line = system::path_line(&self.paths);
-                        ui.add(egui::TextEdit::singleline(&mut line).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+                        // What the system calls the tray (the menu bar on macOS), and signing in.
+                        let mac = if cfg!(target_os = "macos") { "_macos" } else { "" };
+                        heading(ui, "settings.background");
+                        let mut on = self.start_on_logon;
+                        if ui.checkbox(&mut on, t("settings.start_on_logon")).changed() {
+                            match system::set_start_on_logon(on) {
+                                Ok(()) => self.start_on_logon = on,
+                                Err(e) => self.flash(tf("flash.change_failed", &[("error", &e)])),
+                            }
+                        }
+                        note(ui, p, &format!("settings.start_on_logon_note{mac}"));
+                        ui.add_enabled(
+                            self.tray.is_some(),
+                            egui::Checkbox::new(&mut self.state.settings.close_to_tray, t(&format!("settings.close_to_tray{mac}"))),
+                        );
+                        note(ui, p, &format!("settings.close_to_tray_note{mac}"));
+                        ui.add_space(14.0);
                     }
-                }
-                ui.add_space(14.0);
 
-                heading(ui, "settings.data");
-                ui.horizontal(|ui| {
-                    ui.monospace(self.paths.root.display().to_string());
-                    if ui.small_button(t("settings.show")).clicked() {
-                        system::reveal(&self.paths.root);
-                    }
-                });
-                note(ui, p, "settings.data_note");
-                ui.add_space(14.0);
-
-                if telemetry::available() || telemetry::opted_out_by_environment() {
-                    heading(ui, "settings.privacy");
-                    let blocked = telemetry::opted_out_by_environment();
-                    let mut on = self.state.settings.share_usage && !blocked;
-                    if ui.add_enabled(!blocked, egui::Checkbox::new(&mut on, t("settings.share_usage"))).changed() {
-                        self.set_share_usage(on);
-                    }
-                    note(ui, p, if blocked { "settings.usage_blocked" } else { "settings.usage_note" });
-                    if ui.link(t("settings.privacy_statement")).clicked() {
-                        system::open_url(PRIVACY_STATEMENT);
+                    heading(ui, "settings.cli");
+                    para(ui, &i18n::text("settings.cli_note", &[]), |t| t.small().color(p.muted));
+                    ui.horizontal(|ui| {
+                        ui.monospace(self.paths.bin().display().to_string());
+                        if ui.small_button(t("settings.show")).clicked() {
+                            system::reveal(&self.paths.bin());
+                        }
+                    });
+                    let commands = system::commands(&self.paths);
+                    let has = if commands.is_empty() {
+                        i18n::text("settings.cli_empty", &[])
+                    } else {
+                        i18n::text("settings.cli_commands", &[("commands", &commands.join(", "))])
+                    };
+                    para(ui, &has, |t| t.small().color(p.subtle));
+                    if system::bin_on_path(&self.paths) {
+                        para(ui, &i18n::text("settings.cli_on_path", &[]), |t| t.small().color(p.good));
+                    } else {
+                        #[cfg(windows)]
+                        if ui.button(t("settings.cli_add_path")).clicked() {
+                            match system::add_bin_to_path(&self.paths) {
+                                Ok(()) => self.flash(t("flash.path_added")),
+                                Err(e) => self.flash(tf("flash.path_failed", &[("error", &e)])),
+                            }
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            para(ui, &i18n::text("settings.cli_profile", &[]), |t| t.small().color(p.muted));
+                            let mut line = system::path_line(&self.paths);
+                            ui.add(egui::TextEdit::singleline(&mut line).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+                        }
                     }
                     ui.add_space(14.0);
-                }
 
-                heading(ui, "settings.troubleshooting");
-                if ui.checkbox(&mut self.state.settings.debug, t("settings.debug")).changed() {
-                    debug::set(self.state.settings.debug);
-                }
-                note(ui, p, "settings.debug_note");
-                ui.horizontal(|ui| {
-                    ui.monospace(self.paths.logs().display().to_string());
-                    if ui.small_button(t("settings.show")).clicked() {
-                        system::reveal(&self.paths.logs());
+                    heading(ui, "settings.data");
+                    ui.horizontal(|ui| {
+                        ui.monospace(self.paths.root.display().to_string());
+                        if ui.small_button(t("settings.show")).clicked() {
+                            system::reveal(&self.paths.root);
+                        }
+                    });
+                    note(ui, p, "settings.data_note");
+                    ui.add_space(14.0);
+
+                    if telemetry::available() || telemetry::opted_out_by_environment() {
+                        heading(ui, "settings.privacy");
+                        let blocked = telemetry::opted_out_by_environment();
+                        let mut on = self.state.settings.share_usage && !blocked;
+                        if ui.add_enabled(!blocked, egui::Checkbox::new(&mut on, t("settings.share_usage"))).changed() {
+                            self.set_share_usage(on);
+                        }
+                        note(ui, p, if blocked { "settings.usage_blocked" } else { "settings.usage_note" });
+                        if ui.link(t("settings.privacy_statement")).clicked() {
+                            system::open_url(PRIVACY_STATEMENT);
+                        }
+                        ui.add_space(14.0);
                     }
+
+                    heading(ui, "settings.troubleshooting");
+                    if ui.checkbox(&mut self.state.settings.debug, t("settings.debug")).changed() {
+                        debug::set(self.state.settings.debug);
+                    }
+                    note(ui, p, "settings.debug_note");
+                    ui.horizontal(|ui| {
+                        ui.monospace(self.paths.logs().display().to_string());
+                        if ui.small_button(t("settings.show")).clicked() {
+                            system::reveal(&self.paths.logs());
+                        }
+                    });
                 });
             });
         if !open {
