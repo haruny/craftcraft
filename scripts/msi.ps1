@@ -30,9 +30,11 @@ $msi = Join-Path $Out "craftcraft-windows-$Arch.msi"
     "-dVersion=$version" "-dExe=$exe" "-dIcon=$((Resolve-Path assets/icon.ico).Path)" `
     -out "$obj\" installer/craftcraft.wxs
 if ($LASTEXITCODE -ne 0) { throw 'candle failed' }
-# ICE91 only warns that the Start menu shortcut is in a per-user folder; installing for everyone
-# puts it in everyone's, which ICE91 can't tell.
-& "$bin\light.exe" -nologo -ext WixUtilExtension -ext WixUIExtension -cultures:en-us -sice:ICE91 -spdb -out $msi "$obj\craftcraft.wixobj"
+# The validators take the Start menu for a per-user folder, so they want its component kept under
+# HKCU (ICE38, ICE43, ICE57) and warn about the shortcut (ICE91). It's HKMU instead: HKCU just for
+# the user, and HKLM beside everyone's Start menu, which they can't tell.
+$ice = 'ICE38', 'ICE43', 'ICE57', 'ICE91' | ForEach-Object { "-sice:$_" }
+& "$bin\light.exe" -nologo -ext WixUtilExtension -ext WixUIExtension -cultures:en-us @ice -spdb -out $msi "$obj\craftcraft.wixobj"
 if ($LASTEXITCODE -ne 0) { throw 'light failed' }
 
 Write-Host "Built $msi ($version)"

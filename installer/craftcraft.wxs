@@ -81,7 +81,7 @@
     <DirectoryRef Id="ProgramMenuFolder">
       <Component Id="StartMenu" Guid="*">
         <Shortcut Id="StartMenuShortcut" Name="CraftCraft" Description="Install, update and open software rewritten in Rust"
-                  Target="[#craftcraft.exe]" WorkingDirectory="INSTALLFOLDER" />
+                  Target="[INSTALLFOLDER]craftcraft.exe" WorkingDirectory="INSTALLFOLDER" />
         <RegistryValue Root="HKMU" Key="Software\CraftCraft\Installer" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
         <RemoveRegistryKey Action="removeOnInstall" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\CraftCraft" />
       </Component>
